@@ -273,6 +273,10 @@ the descriptor is appended in the child's first turn; each crew handoff is a
 **Verification** — `tsc --noEmit` clean; 25/25 unit tests pass (Config defaults +
 crew parsing, capability advertisement, `inheritsParentContext`, registry name,
 seedless `prepareContinuable`, pre-publication abort, crew role/orchestrator
-resolution, self-handoff and unknown-crew rejection, plus 10 pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail, retry/block and handoff enforcement). A full keyless
-ground-truth run was not possible in the authoring environment (no monorepo test
-kit or keyed model route).
+resolution, self-handoff and unknown-crew rejection, plus 10 pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail, retry/block and handoff enforcement).
+
+**Headless different-model smoke (keyed, `scripts/verify-headless-different-model.sh`)** — boots a headless DSH instance (`test/muse-spark-1.2-contributor` parent) that delegates via `subagent_preset` (one-shot file write) and via `crew_materialize` (four roles). The script then decompresses per-frame `zstd` session logs under `~/.dsh/sessions/--tmp-headless-workspace--` and asserts:
+- parent `request/header` `test/muse-spark-1.2-contributor`,
+- child `subagent/descriptor` `test/deepseek-v4-flash` + `agentPreset: subagent-slim` + `request/header` `test/deepseek-v4-flash` (subagent-slim persona),
+- crew members `test/deepseek-v4-flash` + `subagent-slim`,
+and that the delegated file was written and the parent received the child's `completed` output. Example run shows `b19c0704…` (preset subagent) and `1b889459…`/`cf1cf151…` (crew) descriptors all `deepseek-v4-flash` while parent is `muse-spark`.
