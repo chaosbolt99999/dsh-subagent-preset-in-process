@@ -284,7 +284,7 @@ export function registerCrewTools(ctx: Context, crews: CrewService): (() => void
         properties: {
           ok: { type: 'boolean' },
           looped: { type: 'boolean' },
-          next_role: { type: ['string', 'null'] },
+          next_role: { type: 'string' },
           retries: { type: 'number' },
           blocked: { type: 'boolean' },
         },
@@ -297,7 +297,7 @@ export function registerCrewTools(ctx: Context, crews: CrewService): (() => void
         return Promise.resolve({
           ok: true,
           looped: r.looped,
-          next_role: r.nextRole ?? null,
+          next_role: r.nextRole ?? '',
           retries: r.retries,
           blocked: r.blocked,
         })
