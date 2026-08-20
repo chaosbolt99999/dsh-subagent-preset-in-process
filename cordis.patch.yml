@@ -23,7 +23,9 @@
         provider: deepseek-official
         model: deepseek-v4-flash
         crews:
+          # Routed crew (model chooses next role; add mode: pipeline for deterministic chain)
           engineering:
+            mode: routed
             orchestratorRole: orchestrator
             roles:
               - name: planner
@@ -38,6 +40,22 @@
               - name: verifier
                 presetId: subagent-slim
                 roleTask: Verify the builder's result against the task and report.
+          # Pipeline crew (deterministic order + verify-gate + structured tasks) — enable by
+          # switching engineering.mode to pipeline, or add as a second crew:
+          # engineering-pipeline:
+          #   mode: pipeline
+          #   roles:
+          #     - name: planner
+          #       presetId: subagent-slim
+          #       roleTask: Break the goal into tasks; hand T1 to builder.
+          #       tasks: [{ id: T1, title: Implement login, acceptanceCriteria: Tests pass, status: pending }]
+          #     - name: builder
+          #       presetId: subagent-slim
+          #       roleTask: Implement the task (evidence = diff / test report); hand to verifier.
+          #     - name: verifier
+          #       presetId: subagent-slim
+          #       roleTask: Verify T1 against acceptanceCriteria; call crew_verify with pass/fail.
+          #   pipeline: { order: [planner, builder, verifier], verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 } }
 
     # ── the model-facing delegation tool ───────────────────────────────────
     # Additional `tool-subagent` instance (distinct id from the base `tool-subagent`

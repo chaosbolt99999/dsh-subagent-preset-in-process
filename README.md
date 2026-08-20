@@ -49,45 +49,109 @@ and `inheritsParentContext = false`. `prepareContinuable` is present, so
 | `maxDepth` | `3` | Numeric delegation cap, or `'provider-managed'`. |
 | `crews` | `{}` | Named crews (see below). |
 
+Each crew entry:
+
+```yaml
+crews:
+  engineering:
+    mode: routed            # or pipeline (deterministic chain with verify-gate)
+    orchestratorRole: orchestrator
+    roles:
+      - name: planner
+        presetId: subagent-slim
+        roleTask: Break the goal into ordered tasks.
+        tasks:                               # structured task list per role
+          - id: T1
+            title: Implement login
+            acceptanceCriteria: Tests pass on CI
+            status: pending                  # pending | in_progress | done | failed | blocked
+      - name: builder
+        presetId: subagent-slim
+        roleTask: Implement the assigned task.
+      - name: verifier
+        presetId: subagent-slim
+        roleTask: Verify the builder's result.
+    pipeline:                                # only for mode: pipeline
+      order: [planner, builder, verifier]    # defaults to declaration order when omitted
+      verifyGate:
+        enabled: true
+        verifierRole: verifier
+        maxRetries: 3                        # block after this many fails for one task
+```
+
 ## Crews
 
 A **crew** is a named, ordered set of **roles** (e.g.
 `planner <-> orchestrator <-> builder <-> verifier`). Each role is a
 **continuable** subagent pinned to its own preset and optional model route, and
-carries a `roleTask` delivered on every one of its turns.
+carries a `roleTask` delivered on every one of its turns plus an optional
+structured `tasks` list (`id/title/acceptanceCriteria/status`) that handoffs
+reference and the verifier gates.
 
 - **Turn** = one inbox message to a role (the continuable-subagent FIFO inbox).
 - **Task done** = the role's Activation settles (`stopReason` + closing output),
   the same settlement-notice the subagent service uses — the built-in "it will do
   no further work until you send it more" signal.
-- **Routing** = hybrid: the model (via the `orchestrator` role or `crew_handoff`)
-  decides the next role; the plugin enforces scoping (roles, presets, no
-  self-handoff) and records each handoff.
+- **Routing** — two modes, additive on `crews[crew].mode` (default `routed`):
+  - `routed` (default): the model (via `orchestrator` or `crew_handoff`) chooses
+    the next role; the plugin enforces only same-crew + no self-handoff.
+  - `pipeline`: an ordered chain driven by the plugin (`pipeline.order` else
+    declaration order). `crew_handoff` must follow the deterministic successor;
+    `crew_pipeline_advance` is the gate-aware handoff: a failing verifier loops
+    back to its predecessor with the failure report, a passing verifier advances.
+    The `verifyGate` (verifierRole, maxRetries, enabled) blocks after repeated
+    failures and is reported by `crew_pipeline_status`/`crew_verify`.
+
+Routed example (model chooses next role):
 
 ```yaml
 subagent-preset-in-process:
   config:
     providerName: preset
     presetId: subagent-slim
-    provider: deepseek-official
-    model: deepseek-v4-flash
     crews:
       engineering:
+        mode: routed
         orchestratorRole: orchestrator
         roles:
           - name: planner
-            presetId: subagent-slim       # or a dedicated planner preset
-            roleTask: Break the goal into ordered tasks and hand them to the orchestrator.
-            model: deepseek-v4-pro        # optional per-role route override
-          - name: orchestrator
             presetId: subagent-slim
-            roleTask: Route each task to the right role and track completion.
+            roleTask: Break the goal into ordered tasks.
+            model: deepseek-v4-pro
           - name: builder
             presetId: subagent-slim
-            roleTask: Implement the assigned task and report the result.
+            roleTask: Implement the assigned task.
           - name: verifier
             presetId: subagent-slim
-            roleTask: Verify the builder's result against the task and report.
+            roleTask: Verify the builder's result.
+```
+
+Pipeline example (deterministic chain with verify-gate):
+
+```yaml
+subagent-preset-in-process:
+  config:
+    crews:
+      engineering:
+        mode: pipeline
+        roles:
+          - name: planner
+            presetId: subagent-slim
+            roleTask: Break the goal into ordered tasks.
+            tasks:
+              - id: T1
+                title: Implement login
+                acceptanceCriteria: Unit and integration tests pass
+                status: pending
+          - name: builder
+            presetId: subagent-slim
+            roleTask: Implement the task assigned to T1.
+          - name: verifier
+            presetId: subagent-slim
+            roleTask: Verify T1 against its acceptanceCriteria; report pass/fail as structured verdict.
+        pipeline:
+          order: [planner, builder, verifier]
+          verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 }
 ```
 
 ### Crew tools
@@ -96,15 +160,19 @@ The plugin registers these model-facing tools over `ctx.crews`:
 
 - `crew_materialize(crew)` — start every role as a resident worker (idempotent).
 - `crew_handoff(crew, from_role, to_role, task)` — deliver one role's work to the
-  next role as its next turn. The target role then runs **its** task turn and
-  settles; the orchestrator (or model) reads the settlement and hands off again.
+  next role as its next turn. In `pipeline` mode the `to_role` must be the
+  deterministic successor (verifier may loop to predecessor on failure).
+- `crew_pipeline_advance(crew, from_role, task, task_id?, verifier_verdict?, evidence?)` — deterministic pipeline handoff that respects the verify-gate (pass advances, fail loops with retry counting, `maxRetries` blocks). Handoffs carry `task_id + evidence`; the gate updates task status.
+- `crew_pipeline_status(crew)` — read the pipeline cursor, verify-gate config and per-role structured tasks.
+- `crew_task_update(crew, role, task_id, status?, title?, description?, acceptanceCriteria?)` — edit one structured task.
+- `crew_verify(crew, task_id, passed, evidence?)` — record a verifier's structured pass/fail (updates task, computes loop/next/retries without delivering a turn).
 - `crew_wait(crew, role?)` — **block the current turn** until a role (or every
   role when omitted) settles, then return each stop reason + closing output.
   This replaces `sleep N` + `list_agents` polling: it wakes the moment the role
   reports done, so it stays correct no matter how long the task runs.
 - `subagent_wait(subagent_id)` — the same indefinite wait for any continuable
   child by id.
-- `crew_status()` — list crews, roles, and each crew's orchestrator role.
+- `crew_status()` — list crews, roles, orchestrator, `mode`, pipeline `order`/`verifyGate`/cursor and `tasks`.
 
 ### Continuable preset pinning
 
@@ -202,9 +270,9 @@ logged: each child's `meta.agentPreset` is the durable composition record, and
 the descriptor is appended in the child's first turn; each crew handoff is a
 `followup` turn with a `coordinator` message source.
 
-**Verification** — `tsc --noEmit` clean; 14/14 unit tests pass (Config defaults +
+**Verification** — `tsc --noEmit` clean; 25/25 unit tests pass (Config defaults +
 crew parsing, capability advertisement, `inheritsParentContext`, registry name,
 seedless `prepareContinuable`, pre-publication abort, crew role/orchestrator
-resolution, self-handoff and unknown-crew rejection). A full keyless
+resolution, self-handoff and unknown-crew rejection, plus 10 pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail, retry/block and handoff enforcement). A full keyless
 ground-truth run was not possible in the authoring environment (no monorepo test
 kit or keyed model route).
