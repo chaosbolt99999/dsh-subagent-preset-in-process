@@ -17,6 +17,20 @@ import z from '@deepseek-ai/schemastery'
  * carries a `roleTask` statement delivered on each of its turns.
  */
 
+/** One structured task in a role's task list. */
+export const TaskSchema = z.object({
+  id: z.string().required().description('Stable task id (used for handoff evidence and gate checks).'),
+  title: z.string().required().description('Short task title.'),
+  description: z.string().description('Longer task description.'),
+  acceptanceCriteria: z.string().description('Acceptance criteria checked by the verifier gate.'),
+  status: z
+    .union([z.const('pending'), z.const('in_progress'), z.const('done'), z.const('failed'), z.const('blocked')])
+    .default('pending')
+    .description('Current task status.'),
+})
+
+export type Task = ReturnType<typeof TaskSchema>
+
 /** One role in a crew. */
 export const CrewRoleSchema = z.object({
   name: z.string().required().description('Stable role name (planner/orchestrator/builder/verifier).'),
@@ -31,11 +45,29 @@ export const CrewRoleSchema = z.object({
     .description('Optional role output-token cap.'),
   roleTask: z.string().required().description('Task statement delivered on every turn.'),
   description: z.string().description('Human-facing role description.'),
+  tasks: z.array(TaskSchema).default([]).description('Structured task list for this role; gate checks the verifier against these.'),
 })
+
+export const CrewPipelineSchema = z
+  .object({
+    order: z.array(z.string()).default([]).description('Explicit pipeline order; defaults to declaration order when empty.'),
+    verifyGate: z
+      .object({
+        enabled: z.boolean().default(true).description('When true, the verifier must pass before the pipeline advances.'),
+        verifierRole: z.string().default('verifier').description('Role whose structured pass/fail gates the pipeline.'),
+        maxRetries: z.number().step(1).min(0).max(20).default(3).description('Max verifier failures before the pipeline blocks.'),
+      })
+      .default({ enabled: true, verifierRole: 'verifier', maxRetries: 3 })
+      .description('Verify-gate config.'),
+  })
+  .default({ order: [], verifyGate: { enabled: true, verifierRole: 'verifier', maxRetries: 3 } })
+  .description('Pipeline-mode order and gate.')
 
 export const CrewSchema = z.object({
   orchestratorRole: z.string().description('Role that routes handoffs (default: orchestrator, else first role).'),
+  mode: z.union([z.const('routed'), z.const('pipeline')]).default('routed').description("Crew routing mode: 'routed' (model chooses next role) or 'pipeline' (ordered chain with verify-gate)."),
   roles: z.array(CrewRoleSchema).description('Ordered role chain.'),
+  pipeline: CrewPipelineSchema,
 })
 
 export const CrewsSchema = z.dict(CrewSchema).default({}).description('Named crews of role-bound workers.')
