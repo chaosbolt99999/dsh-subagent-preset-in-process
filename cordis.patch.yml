@@ -20,7 +20,7 @@
       config:
         providerName: preset
         presetId: subagent-slim
-        provider: deepseek-official
+        provider: test
         model: deepseek-v4-flash
         crews:
           # Routed crew (model chooses next role; add mode: pipeline for deterministic chain)
@@ -67,3 +67,6 @@
         provider: preset
         toolName: subagent_preset
         backgroundMode: continuable
+        agentOptions:
+          provider: test
+          model: deepseek-v4-flash
