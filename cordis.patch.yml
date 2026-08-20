@@ -1,0 +1,51 @@
+# dsh-subagent-preset-in-process bundle patch.
+#
+# A bundle patch targets rows by id. New rows (the provider + the delegation
+# tool) are introduced with one `- insert:` block. The `agent-presets` roster
+# is NOT restated here: the base bundle already mounts it (default `standard`,
+# `includeUserRoot: true`), so the pinned `subagent-slim` preset is discovered
+# from the harness-home user root `$DSH_HOME/.agent-presets` — no need to
+# override the shipped roots and clobber `standard`/`minimal`/`code`/`cordis`.
+
+- insert:
+    # ── the preset-pinning backend (host plane) ────────────────────────────
+    # Registered once, process-global, like the shipped spawn/fork backends.
+    # `providerName` is what `tool-subagent` selects below; `presetId` is the
+    # preset every (non-crew) child is composed under; `provider`/`model`
+    # force the child's model route. `crews` declares role-bound continuable
+    # workers: each role has its own preset, optional model route, and a
+    # `roleTask` delivered on every turn; `orchestratorRole` routes handoffs.
+    - id: subagent-preset-in-process
+      name: 'dsh-subagent-preset-in-process'
+      config:
+        providerName: preset
+        presetId: subagent-slim
+        provider: deepseek-official
+        model: deepseek-v4-flash
+        crews:
+          engineering:
+            orchestratorRole: orchestrator
+            roles:
+              - name: planner
+                presetId: subagent-slim
+                roleTask: Break the goal into ordered tasks and hand them to the orchestrator.
+              - name: orchestrator
+                presetId: subagent-slim
+                roleTask: Route each task to the right role and track completion.
+              - name: builder
+                presetId: subagent-slim
+                roleTask: Implement the assigned task and report the result.
+              - name: verifier
+                presetId: subagent-slim
+                roleTask: Verify the builder's result against the task and report.
+
+    # ── the model-facing delegation tool ───────────────────────────────────
+    # Additional `tool-subagent` instance (distinct id from the base `tool-subagent`
+    # row that stays on `spawn`). Lets the model delegate through the pinned
+    # backend via the `subagent_preset` tool.
+    - id: tool-subagent-preset
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: preset
+        toolName: subagent_preset
+        backgroundMode: continuable

@@ -1,0 +1,30 @@
+# The `subagent-slim` agent preset: a focused worker composition for delegated
+# subagents. Pinned by the `subagent-preset-in-process` provider, which mounts
+# this preset for every child instead of joining the parent's composition.
+#
+# This is an AGENT-PLANE composition. Service rows must carry an `isolate`
+# realm or they leak to the root; tools that only register into the host
+# registry need no realm. The subagent registry, backends, sandbox, model
+# route, and persistence remain HOST-plane — a child's scope joins this
+# standing mount and sees precisely the tools and persona below.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a focused worker subagent. Complete the assigned subtask and report.
+
+# ── tools ───────────────────────────────────────────────────────────────────
+
+# Both register into the host `tools` registry and provide nothing, so they
+# need no realm. The `fs` service and its policy stay in the host.
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'

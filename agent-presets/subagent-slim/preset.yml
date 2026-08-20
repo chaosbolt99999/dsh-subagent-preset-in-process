@@ -1,0 +1,3 @@
+name: Subagent Slim
+description: Focused worker agent for delegated subagents: persona, bash, and file tools only.
+order: 5
