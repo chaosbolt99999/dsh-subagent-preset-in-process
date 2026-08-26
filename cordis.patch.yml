@@ -11,8 +11,9 @@
     # ── the preset-pinning backend (host plane) ────────────────────────────
     # Registered once, process-global, like the shipped spawn/fork backends.
     # `providerName` is what `tool-subagent` selects below; `presetId` is the
-    # preset every (non-crew) child is composed under; `provider`/`model`
-    # force the child's model route. `crews` declares role-bound continuable
+    # preset every (non-crew) child is composed under; `provider`/`model` are
+    # the base route — Settings → Plugins overrides them live and every child
+    # follows the resolved values. `crews` declares role-bound continuable
     # workers: each role has its own preset, optional model route, and a
     # `roleTask` delivered on every turn; `orchestratorRole` routes handoffs.
     - id: subagent-preset-in-process
@@ -20,8 +21,10 @@
       config:
         providerName: preset
         presetId: subagent-slim
-        provider: test
-        model: deepseek-v4-flash
+        # Base route only — Settings → Plugins overrides it live, and EVERY
+        # child (one-shot, continuable, crew) follows the resolved settings.
+        provider: custom2
+        model: x-preview-f-free
         crews:
           # Routed crew (model chooses next role; add mode: pipeline for deterministic chain)
           engineering:
@@ -67,6 +70,6 @@
         provider: preset
         toolName: subagent_preset
         backgroundMode: continuable
-        agentOptions:
-          provider: test
-          model: deepseek-v4-flash
+        # No static agentOptions: the route comes from the provider's detached
+        # spec (live resolved settings), merged under any caller request. Add a
+        # per-tool override here later for finer-grained control.

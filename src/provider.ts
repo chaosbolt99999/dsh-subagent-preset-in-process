@@ -251,14 +251,20 @@ export class PresetInProcessProvider implements SubagentProvider {
   }
 
   prepareContinuable() {
-    // The provider's continuable children are pinned to `config.presetId` too:
-    // the continuation manager reads this detached `presetId` and mounts it for
-    // the child instead of inheriting the parent's preset. A role-level
-    // `request.presetId` (crews) still overrides this provider-level default.
-    const presetId = this.readConfig().presetId
-    // `ContinuableCreateSpec.presetId` is threaded by the patched shared
-    // runtime; cast so the plugin also typechecks against an unpatched
-    // `@deepseek-ai/dsh-subagent` typings install.
-    return Promise.resolve(presetId !== undefined ? { presetId } : {}) as any
+    // Continuable children follow the SAME live settings route as one-shot
+    // runs: the detached spec carries the resolved config's provider/model
+    // (plus maxTokens when set), and the continuation manager merges it UNDER
+    // any caller-supplied request overrides (role-level pins win). `presetId`
+    // mounts the pinned preset instead of inheriting the parent's composition;
+    // a role-level `request.presetId` (crews) still overrides this default.
+    const config = this.readConfig()
+    return Promise.resolve({
+      ...(config.presetId !== undefined ? { presetId: config.presetId } : {}),
+      agentOptions: {
+        provider: config.provider,
+        model: config.model,
+        ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
+      },
+    })
   }
 }

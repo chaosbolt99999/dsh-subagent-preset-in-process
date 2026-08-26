@@ -1,10 +1,11 @@
 # dsh-subagent-preset-in-process
 
 A DSH subagent backend that pins **every child agent** to a named **agent
-preset** and a fixed **model route** (`deepseek-v4-flash` by default). It is a
-Cordis function plugin that registers a `SubagentProvider` on `ctx.subagents`,
-so the shipped `tool-subagent` (or any custom tool) can delegate children that
-always run under one composition regardless of the parent's preset.
+preset** and routes every child through the plugin's resolved **settings**
+(provider/model, editable live in Settings → Plugins). It is a Cordis function
+plugin that registers a `SubagentProvider` on `ctx.subagents`, so the shipped
+`tool-subagent` (or any custom tool) can delegate children that always run under
+one composition regardless of the parent's preset.
 
 ## Why
 
@@ -12,7 +13,29 @@ The shipped in-process backends (`spawn`, `fork`) inherit the **parent's**
 preset (`composeFrom`) and the parent's model. There is no shipped backend that
 mounts a *named* preset for a child. This plugin fills that gap: it mounts
 `config.presetId` for every child (via `AgentPresets.mount`, not inheritance)
-and forces `config.provider`/`config.model` on the child's `agentOptions`.
+and resolves every child's route from the plugin's live resolved config.
+
+## Model route — follows Settings (2026-08-26)
+
+Every child — one-shot, continuable (`backgroundMode: continuable`), and crew
+member — gets its provider/model from ONE place: the plugin's resolved settings
+(composition base + the `subagent-preset-in-process` Settings namespace). A
+Settings → Plugins edit applies to the next child with no restart.
+
+Route precedence:
+
+1. **Request-level override** — `agentOptions` on a `tool-subagent` row or a
+   crew role (`provider`/`model`/`maxTokens`). Absent by default; this is the
+   future finer-grained control knob.
+2. **Plugin settings** — `provider`/`model` as resolved at start time.
+3. **Parent inheritance** — any field still unresolved falls back to the
+   parent's route via `resolveChildAgentOptions`.
+
+Mechanics: one-shot runs force the route inside `start()`; continuable runs are
+routed through the detached `ContinuableCreateSpec.agentOptions` returned by
+`prepareContinuable()` (threaded by the shared-runtime patch — see
+`SHARED-PATCH.md`), and the manager records the EFFECTIVE route in the durable
+descriptor so cold resume reuses exactly what was used.
 
 ## Behavior
 
@@ -43,8 +66,8 @@ and `inheritsParentContext = false`. `prepareContinuable` is present, so
 |---|---|---|
 | `providerName` | `preset` | Registry name on `ctx.subagents`. |
 | `presetId` | *(optional)* | Default agent preset for non-crew children, and fallback composition. |
-| `provider` | `deepseek-official` | Default child LLM provider. |
-| `model` | `deepseek-v4-flash` | Default child model id. |
+| `provider` | `deepseek-official` | Child LLM provider — Settings → Plugins overrides live. |
+| `model` | `deepseek-v4-flash` | Child model id — Settings → Plugins overrides live. |
 | `maxTokens` | *(none)* | Optional default output-token cap. |
 | `maxDepth` | `3` | Numeric delegation cap, or `'provider-managed'`. |
 | `crews` | `{}` | Named crews (see below). |
@@ -174,15 +197,24 @@ The plugin registers these model-facing tools over `ctx.crews`:
   child by id.
 - `crew_status()` — list crews, roles, orchestrator, `mode`, pipeline `order`/`verifyGate`/cursor and `tasks`.
 
-### Continuable preset pinning
+### Continuable preset pinning + routing
 
 Continuable children (crew members and `backgroundMode: continuable` through a
 `tool-subagent` instance) are composed by the subagent continuation manager, not
-by this plugin's provider. Pinning them to `presetId` therefore requires a small
-additive change to `@deepseek-ai/dsh-subagent` (see `SHARED-PATCH.md`). With that
-patch, `request.presetId` (per-role) and `prepareContinuable().presetId`
-(provider-level) are mounted instead of inheriting the parent's preset, and the
-pinned preset survives cold resume via the durable session header.
+by this plugin's provider. Pinning them to `presetId` and giving them the
+settings route therefore requires a small additive change to
+`@deepseek-ai/dsh-subagent` (see `SHARED-PATCH.md`). With that patch:
+
+- `request.presetId` (per-role) and `prepareContinuable().presetId`
+  (provider-level) are mounted instead of inheriting the parent's preset, and
+  the pinned preset survives cold resume via the durable session header.
+- `prepareContinuable().agentOptions` carries the settings-derived route,
+  merged UNDER any caller-supplied request options; the effective route is what
+  the durable descriptor records, so cold resume reuses it.
+
+Applied as source edits to a run-from-source checkout
+(`/home/chaosbolt/deepseek-harness`, release 0.1.1-rc.2) on 2026-08-26; rebuild
+host libs (`pnpm run build:lib:host`) after applying, then restart DSH.
 
 ## Wiring
 
@@ -270,13 +302,29 @@ logged: each child's `meta.agentPreset` is the durable composition record, and
 the descriptor is appended in the child's first turn; each crew handoff is a
 `followup` turn with a `coordinator` message source.
 
-**Verification** — `tsc --noEmit` clean; 25/25 unit tests pass (Config defaults +
+**Verification** — `tsc --noEmit` clean; 27/27 unit tests pass (Config defaults +
 crew parsing, capability advertisement, `inheritsParentContext`, registry name,
-seedless `prepareContinuable`, pre-publication abort, crew role/orchestrator
-resolution, self-handoff and unknown-crew rejection, plus 10 pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail, retry/block and handoff enforcement).
+`prepareContinuable` spec = pinned presetId + settings-derived route incl. live
+route changes and maxTokens passthrough, pre-publication abort, crew
+role/orchestrator resolution, self-handoff and unknown-crew rejection, plus 10
+pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail,
+retry/block and handoff enforcement). The harness subagent workspaces pass
+543/543 with the shared-runtime patch applied.
 
-**Headless different-model smoke (keyed, `scripts/verify-headless-different-model.sh`)** — boots a headless DSH instance (`test/muse-spark-1.2-contributor` parent) that delegates via `subagent_preset` (one-shot file write) and via `crew_materialize` (four roles). The script then decompresses per-frame `zstd` session logs under `~/.dsh/sessions/--tmp-headless-workspace--` and asserts:
-- parent `request/header` `test/muse-spark-1.2-contributor`,
-- child `subagent/descriptor` `test/deepseek-v4-flash` + `agentPreset: subagent-slim` + `request/header` `test/deepseek-v4-flash` (subagent-slim persona),
-- crew members `test/deepseek-v4-flash` + `subagent-slim`,
-and that the delegated file was written and the parent received the child's `completed` output. Example run shows `b19c0704…` (preset subagent) and `1b889459…`/`cf1cf151…` (crew) descriptors all `deepseek-v4-flash` while parent is `muse-spark`.
+**Run-from-source web smoke (2026-08-26)** — DSH booted from a source checkout
+(`pnpm dsh web`, release 0.1.1-rc.2) with this plugin linked into the `web`
+profile. A continuable `subagent_preset` delegation produced child
+`fb691986…`: durable session header `agentPreset: "subagent-slim"` +
+`delegationDepth: 1`; descriptor `provider: preset, mode: continuable,
+agentProvider: custom2, agentModel: x-preview-f-free`; request header on the
+same route; 18-tool slim worker toolset (not the parent's 35); turn completed
+with the expected sentinel reply. An earlier child (`98427cd8…`) before the
+settings-route change showed the same pinning but the old static
+`test/deepseek-v4-flash` route (upstream 401 out-of-credits), which is what
+motivated settings-driven routing.
+
+**Headless different-model smoke (keyed, `scripts/verify-headless-different-model.sh`)** — boots a headless DSH instance that delegates via `subagent_preset` (one-shot file write) and via `crew_materialize` (four roles). The script then decompresses per-frame `zstd` session logs under `~/.dsh/sessions/--tmp-headless-workspace--` and asserts:
+- parent `request/header` contains `PARENT_MODEL_SUBSTR` (default `x-preview`),
+- child `subagent/descriptor` `$EXPECTED_CHILD_PROVIDER/$EXPECTED_CHILD_MODEL` + `agentPreset: subagent-slim` + matching `request/header` (subagent-slim persona),
+- crew members on the same route + preset,
+and that the delegated file was written and the parent received the child's `completed` output. Expectations are env-overridable since routes now follow Settings; defaults reflect the current deployment (`custom2`/`x-preview-f-free`). The historical run against the previous fixed-route wiring (`test/deepseek-v4-flash` children under a `muse-spark` parent) is recorded in git history and AGENTS.md §8.1.

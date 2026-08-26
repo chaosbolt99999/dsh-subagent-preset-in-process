@@ -67,14 +67,39 @@ describe('PresetInProcessProvider', () => {
     assert.equal(p.name, 'preset')
   })
 
-  it('prepareContinuable contributes the pinned preset id', async () => {
+  it('prepareContinuable contributes the pinned preset id and the settings route', async () => {
     const p = new PresetInProcessProvider('preset', () => cfg as never)
-    assert.deepEqual(await p.prepareContinuable(), { presetId: 'subagent-slim' })
+    assert.deepEqual(await p.prepareContinuable(), {
+      presetId: 'subagent-slim',
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    })
   })
 
-  it('prepareContinuable contributes nothing without a preset id', async () => {
+  it('prepareContinuable carries maxTokens when configured', async () => {
+    const p = new PresetInProcessProvider('preset', () => ({ ...cfg, maxTokens: 4096 }) as never)
+    assert.deepEqual(await p.prepareContinuable(), {
+      presetId: 'subagent-slim',
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash', maxTokens: 4096 },
+    })
+  })
+
+  it('prepareContinuable follows a live settings route change', async () => {
+    // The readConfig callback is the live resolved settings: a Settings →
+    // Plugins edit must reach the NEXT continuable child's route verbatim.
+    let current = { ...cfg }
+    const p = new PresetInProcessProvider('preset', () => current)
+    const before = await p.prepareContinuable()
+    current = { ...cfg, provider: 'custom2', model: 'x-preview-f-free' }
+    const after = await p.prepareContinuable()
+    assert.deepEqual(before.agentOptions, { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+    assert.deepEqual(after.agentOptions, { provider: 'custom2', model: 'x-preview-f-free' })
+  })
+
+  it('prepareContinuable contributes only the route without a preset id', async () => {
     const p = new PresetInProcessProvider('preset', () => ({ ...cfg, presetId: undefined }) as never)
-    assert.deepEqual(await p.prepareContinuable(), {})
+    assert.deepEqual(await p.prepareContinuable(), {
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    })
   })
 
   it('rejects immediately when the signal is already aborted', async () => {

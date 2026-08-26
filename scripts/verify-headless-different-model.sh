@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# verify-headless-different-model.sh — headless regression for different-model subagents
+# verify-headless-different-model.sh — headless regression for preset pinning + settings-driven routes
 # Spawns a headless DSH instance that delegates via subagent_preset (continuable) and
 # via crew_materialize, then verifies the session logs show:
-#   - parent: test/muse-spark-1.2-contributor, agentPreset standard
-#   - child (preset): test/deepseek-v4-flash, agentPreset subagent-slim
-#   - crew members: test/deepseek-v4-flash, agentPreset subagent-slim
+#   - child (preset): $EXPECTED_CHILD_PROVIDER/$EXPECTED_CHILD_MODEL, agentPreset subagent-slim
+#   - crew members:   same route, agentPreset subagent-slim
 # The child must return properly (file written, output completed).
+#
+# Since 2026-08-26 every child route follows Settings → Plugins (the live resolved
+# config), so the expected route is configurable via env (defaults = the current
+# deployment's settings):
+#   EXPECTED_CHILD_PROVIDER=custom2 EXPECTED_CHILD_MODEL=x-preview-f-free
+#   PARENT_MODEL_SUBSTR=x-preview   # substring matched against the parent's header/output
 
 set -euo pipefail
 WORKSPACE=${1:-/tmp/headless-workspace}
+EXPECTED_CHILD_PROVIDER=${EXPECTED_CHILD_PROVIDER:-custom2}
+EXPECTED_CHILD_MODEL=${EXPECTED_CHILD_MODEL:-x-preview-f-free}
+PARENT_MODEL_SUBSTR=${PARENT_MODEL_SUBSTR:-x-preview}
+export EXPECTED_CHILD_PROVIDER EXPECTED_CHILD_MODEL PARENT_MODEL_SUBSTR
 DSH_HOME_REAL="$HOME/.dsh"
 DSH_HOME_TMP="$WORKSPACE/.dsh-home"
 # Use real DSH_HOME but isolate projectKey via WORKSPACE cwd
@@ -30,7 +39,7 @@ echo "--- Test 1: subagent_preset different model ---"
 cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 90 dsh --profile headless "Use subagent_preset to write /tmp/headless_verify_different_model.txt with content 'hello-different-model' and report file was written. Also report your model." 2>&1 | tee /tmp/verify1.txt
 cat /tmp/verify1.txt | head -n 50
 if ! grep -q "hello-different-model" /tmp/verify1.txt; then echo "FAIL: subagent did not write file"; exit 1; fi
-if ! grep -q "muse-spark" /tmp/verify1.txt; then echo "FAIL: parent model not reported"; exit 1; fi
+if ! grep -q "$PARENT_MODEL_SUBSTR" /tmp/verify1.txt; then echo "FAIL: parent model not reported"; exit 1; fi
 echo "PASS: subagent_preset file write and parent model reported"
 
 echo "--- Test 2: crew_materialize different model ---"
@@ -62,8 +71,8 @@ for(const d of dirs){
   if(!fs.existsSync(p)) continue;
   const raw=decompressPerFrame(p);
   const hasDescriptor=raw.includes('subagent/descriptor');
-  const hasDeepseek=raw.includes('deepseek-v4-flash');
-  const hasMuse=raw.includes('muse-spark');
+  const hasExpectedModel=raw.includes(process.env.EXPECTED_CHILD_MODEL);
+  const hasParent=raw.includes(process.env.PARENT_MODEL_SUBSTR);
   const hasPresetSlim=raw.includes('subagent-slim');
   const hasCrew=raw.includes('crew:engineering');
   // Find descriptor line
@@ -71,21 +80,21 @@ for(const d of dirs){
     if(line.includes('subagent/descriptor')){
       console.log(`DESCRIPTOR in ${d}: ${line.slice(0,600)}`);
       const j=JSON.parse(line);
-      if(j.data.agentModel==='deepseek-v4-flash' && j.data.agentProvider==='test'){
+      if(j.data.agentModel===process.env.EXPECTED_CHILD_MODEL && j.data.agentProvider===process.env.EXPECTED_CHILD_PROVIDER){
         if(j.data.label && j.data.label.startsWith('crew:')) foundCrew=true;
         else foundSubagent=true;
       }
     }
-    if(line.includes('request/header') && line.includes('muse-spark')){
+    if(line.includes('request/header') && line.includes(process.env.PARENT_MODEL_SUBSTR)){
       foundParent=true;
     }
   }
-  if(hasDeepseek && hasPresetSlim) console.log(`OK: ${d} has deepseek + slim`);
+  if(hasExpectedModel && hasPresetSlim) console.log(`OK: ${d} has ${process.env.EXPECTED_CHILD_MODEL} + slim`);
 }
-if(!foundParent) { console.error("FAIL: parent muse-spark not found"); process.exit(1); }
-if(!foundSubagent) { console.error("FAIL: subagent_preset deepseek not found"); process.exit(1); }
-if(!foundCrew) { console.error("FAIL: crew deepseek not found"); process.exit(1); }
-console.log("PASS: logs show parent muse-spark, subagent deepseek-v4-flash, crew deepseek-v4-flash, all with subagent-slim preset");
+if(!foundParent) { console.error(`FAIL: parent route substring "${process.env.PARENT_MODEL_SUBSTR}" not found`); process.exit(1); }
+if(!foundSubagent) { console.error("FAIL: subagent_preset child route not found in descriptor"); process.exit(1); }
+if(!foundCrew) { console.error("FAIL: crew member route not found in descriptor"); process.exit(1); }
+console.log(`PASS: logs show parent "${process.env.PARENT_MODEL_SUBSTR}", subagent + crew on ${process.env.EXPECTED_CHILD_PROVIDER}/${process.env.EXPECTED_CHILD_MODEL}, all with subagent-slim preset`);
 JS
 echo "=== All verifications passed ==="
 echo "Check file written by subagent:"
