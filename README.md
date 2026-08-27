@@ -15,12 +15,14 @@ mounts a *named* preset for a child. This plugin fills that gap: it mounts
 `config.presetId` for every child (via `AgentPresets.mount`, not inheritance)
 and resolves every child's route from the plugin's live resolved config.
 
-## Model route — follows Settings (2026-08-26)
+## Model route — follows Settings (2026-08-26, route = merge/dsv4f since 2026-08-27)
 
 Every child — one-shot, continuable (`backgroundMode: continuable`), and crew
 member — gets its provider/model from ONE place: the plugin's resolved settings
 (composition base + the `subagent-preset-in-process` Settings namespace). A
-Settings → Plugins edit applies to the next child with no restart.
+Settings → Plugins edit applies to the next child with no restart. The current
+deployment routes every child through `merge/deepseek/deepseek-v4-flash-0731`
+(merge gateway, dsv4f) over a `zai/glm-5.3-flash` parent.
 
 Route precedence:
 
@@ -71,6 +73,11 @@ and `inheritsParentContext = false`. `prepareContinuable` is present, so
 | `maxTokens` | *(none)* | Optional default output-token cap. |
 | `maxDepth` | `3` | Numeric delegation cap, or `'provider-managed'`. |
 | `crews` | `{}` | Named crews (see below). |
+
+Role fields (inside `crews.<crew>.roles[]`): `name`, `presetId`, `roleTask`
+(required); `provider`/`model`/`maxTokens` (optional route overrides);
+**`toolFilter`** (`allow`/`deny`, see the isolation warning below); `tasks`
+(structured task list); `description`.
 
 Each crew entry:
 
@@ -177,6 +184,48 @@ subagent-preset-in-process:
           verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 }
 ```
 
+### Preset isolation is NOT automatic on host-plane deployments (2026-08-27)
+
+Mounting `subagent-slim` pins the composition, but on deployments where
+`dsh-base` registers model-facing tools in the **host/global layer** (every
+CLI/headless profile) a preset join is **additive**: the child still sees the
+global registry, so without an explicit filter a "slim" role silently runs with
+the parent's full tool set (36 tools in the 2026-08-26 crew run). This bit the
+crews feature in live testing and is why every role — and the
+`tool-subagent-preset` row — now carries a `toolFilter.allow` list in
+`cordis.patch.yml`. Three rules learned the hard way:
+
+1. `tools.restrict()` fails **loud** on names that are not global tools.
+   `report` (the continuable child's reporting tool) is registered in the
+   child's own layer by the subagent runtime and is EXEMPT from filtering — it
+   must never appear in an allowlist, and children receive it regardless.
+2. Both config surfaces must agree: `cordis.patch.yml` (composition base) AND
+   `~/.dsh/settings.yaml` (Settings namespace, which overrides the base at
+   runtime). Fixing only one still materializes roles with the stale filter.
+3. `meta.agentPreset` in the session header is the durable *composition*
+   record, not proof of isolation — verify the actual `request/header` tool
+   list (or the descriptor's `toolFilter`) in the child's log.
+
+### Live-testing fixes (2026-08-27)
+
+Four bugs found by live headless crew testing (full diagnosis in
+`../AGENTS.md` §10, commit `725e98c`):
+
+1. **Crew members were never tool-isolated** (above) — per-role `toolFilter`
+   added and threaded through `materialize()`; recorded in the durable
+   descriptor so cold resume reconstructs it.
+2. **`crew_wait` fabricated `completed`** — `waitForSettlement` treated the
+   pre-turn `idle` window as settled; it now re-arms the liveness read after a
+   macrotask boundary, supports a `timeoutMs` bound (`timeout` stop reason),
+   and `crew_wait` observes roles concurrently.
+3. **One-shot `subagent_preset` ignored a per-request `presetId`** —
+   `start()` now uses `request.presetId ?? config.presetId`.
+4. **Live settings edits never reached crews** — `CrewService.reloadCrews()`
+   runs on settings change; the next `materialize()` uses the new definitions
+   (resident members keep their composition).
+
+Unit tests: **31/31** (`crew.spec 8` + `provider.spec 13` + `pipeline.spec 10`).
+
 ### Crew tools
 
 The plugin registers these model-facing tools over `ctx.crews`:
@@ -190,9 +239,11 @@ The plugin registers these model-facing tools over `ctx.crews`:
 - `crew_task_update(crew, role, task_id, status?, title?, description?, acceptanceCriteria?)` — edit one structured task.
 - `crew_verify(crew, task_id, passed, evidence?)` — record a verifier's structured pass/fail (updates task, computes loop/next/retries without delivering a turn).
 - `crew_wait(crew, role?)` — **block the current turn** until a role (or every
-  role when omitted) settles, then return each stop reason + closing output.
-  This replaces `sleep N` + `list_agents` polling: it wakes the moment the role
-  reports done, so it stays correct no matter how long the task runs.
+  role when omitted — observed concurrently) settles, then return each stop
+  reason + closing output. Correctly waits out the pre-turn `idle` window (a
+  role that was just handed work is not reported `completed`), and stops
+  waiting on abort or after an optional timeout. This replaces `sleep N` +
+  `list_agents` polling: it wakes the moment the role reports done.
 - `subagent_wait(subagent_id)` — the same indefinite wait for any continuable
   child by id.
 - `crew_status()` — list crews, roles, orchestrator, `mode`, pipeline `order`/`verifyGate`/cursor and `tasks`.
@@ -232,8 +283,8 @@ host libs (`pnpm run build:lib:host`) after applying, then restart DSH.
   config:
     providerName: preset
     presetId: subagent-slim
-    provider: deepseek-official
-    model: deepseek-v4-flash
+    provider: merge                                # base route only; Settings overrides live
+    model: deepseek/deepseek-v4-flash-0731
 
 - id: tool-subagent-preset
   name: '@deepseek-ai/dsh-tool-subagent'
@@ -302,14 +353,16 @@ logged: each child's `meta.agentPreset` is the durable composition record, and
 the descriptor is appended in the child's first turn; each crew handoff is a
 `followup` turn with a `coordinator` message source.
 
-**Verification** — `tsc --noEmit` clean; 27/27 unit tests pass (Config defaults +
-crew parsing, capability advertisement, `inheritsParentContext`, registry name,
-`prepareContinuable` spec = pinned presetId + settings-derived route incl. live
-route changes and maxTokens passthrough, pre-publication abort, crew
-role/orchestrator resolution, self-handoff and unknown-crew rejection, plus 10
-pipeline/task/verify-gate tests for order, next/prev, task status, verify pass/fail,
-retry/block and handoff enforcement). The harness subagent workspaces pass
-543/543 with the shared-runtime patch applied.
+**Verification** — `tsc --noEmit` clean; 31/31 unit tests pass (Config defaults +
+crew parsing incl. per-role toolFilter, capability advertisement,
+`inheritsParentContext`, registry name, `prepareContinuable` spec = pinned
+presetId + settings-derived route incl. live route changes and maxTokens
+passthrough, pre-publication abort, per-request `presetId` override in `start()`,
+crew role/orchestrator resolution, self-handoff and unknown-crew rejection,
+`reloadCrews` live-settings tests, plus 10 pipeline/task/verify-gate tests for
+order, next/prev, task status, verify pass/fail, retry/block and handoff
+enforcement). The harness subagent workspaces pass 543/543 with the
+shared-runtime patch applied.
 
 **Run-from-source web smoke (2026-08-26)** — DSH booted from a source checkout
 (`pnpm dsh web`, release 0.1.1-rc.2) with this plugin linked into the `web`
@@ -323,8 +376,19 @@ settings-route change showed the same pinning but the old static
 `test/deepseek-v4-flash` route (upstream 401 out-of-credits), which is what
 motivated settings-driven routing.
 
-**Headless different-model smoke (keyed, `scripts/verify-headless-different-model.sh`)** — boots a headless DSH instance that delegates via `subagent_preset` (one-shot file write) and via `crew_materialize` (four roles). The script then decompresses per-frame `zstd` session logs under `~/.dsh/sessions/--tmp-headless-workspace--` and asserts:
-- parent `request/header` contains `PARENT_MODEL_SUBSTR` (default `x-preview`),
+**Headless different-model smoke (keyed, `scripts/verify-headless-different-model.sh`)** — boots a headless DSH instance that delegates via `subagent_preset` (one-shot file write) and via `crew_materialize` (four roles). The script then decompresses per-frame `zstd` session logs and asserts:
+- parent `request/header` contains `PARENT_MODEL_SUBSTR`,
 - child `subagent/descriptor` `$EXPECTED_CHILD_PROVIDER/$EXPECTED_CHILD_MODEL` + `agentPreset: subagent-slim` + matching `request/header` (subagent-slim persona),
 - crew members on the same route + preset,
-and that the delegated file was written and the parent received the child's `completed` output. Expectations are env-overridable since routes now follow Settings; defaults reflect the current deployment (`custom2`/`x-preview-f-free`). The historical run against the previous fixed-route wiring (`test/deepseek-v4-flash` children under a `muse-spark` parent) is recorded in git history and AGENTS.md §8.1.
+and that the delegated file was written and the parent received the child's `completed` output. Expectations are env-overridable; **defaults now reflect the current deployment** (`EXPECTED_CHILD_PROVIDER=merge`, `EXPECTED_CHILD_MODEL=deepseek/deepseek-v4-flash-0731`, `PARENT_MODEL_SUBSTR=glm`). The harness CLI is invoked through `DSH_BIN` (default `pnpm --dir /home/chaosbolt/deepseek-harness dsh` — no global `dsh` binary exists). Note: a headless run launched via `pnpm --dir <checkout>` logs under the checkout's ProjectKey (`--home-chaosbolt-deepseek-harness--`), not the workspace key, because pnpm changes cwd.
+
+**Crews live-test round (2026-08-27, post-fix)** — routed crew
+(`crew_status → crew_materialize → crew_handoff planner→orchestrator "Reply
+with the single word ACK" → crew_wait`) completed end to end; orchestrator
+settled `completed` with output exactly `ACK`. One-shot `subagent_preset`
+wrote the marker file with a 9-tool slim set. Every child verified from its
+per-frame-decoded log: header `agentPreset: subagent-slim` + `delegationDepth:
+1`, descriptor route `merge/deepseek-v4-flash-0731` (plus the role's
+`toolFilter.allow`), and role-scoped tool lists (planner/orchestrator 14,
+builder 12, verifier 13, one-shot 9). The pre-fix run of the same test showed
+the 36-tool leak that motivated the `toolFilter` work (AGENTS.md §10.1).
