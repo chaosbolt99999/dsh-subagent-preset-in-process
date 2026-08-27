@@ -14,9 +14,12 @@
 
 set -euo pipefail
 WORKSPACE=${1:-/tmp/headless-workspace}
-EXPECTED_CHILD_PROVIDER=${EXPECTED_CHILD_PROVIDER:-custom2}
-EXPECTED_CHILD_MODEL=${EXPECTED_CHILD_MODEL:-x-preview-f-free}
-PARENT_MODEL_SUBSTR=${PARENT_MODEL_SUBSTR:-x-preview}
+EXPECTED_CHILD_PROVIDER=${EXPECTED_CHILD_PROVIDER:-merge}
+EXPECTED_CHILD_MODEL=${EXPECTED_CHILD_MODEL:-deepseek/deepseek-v4-flash-0731}
+PARENT_MODEL_SUBSTR=${PARENT_MODEL_SUBSTR:-glm}
+# Harness CLI: the repo checkout drives it via pnpm (`pnpm dsh`); plain `dsh` is
+# not installed globally on this host.
+DSH_BIN=${DSH_BIN:-pnpm --dir /home/chaosbolt/deepseek-harness dsh}
 export EXPECTED_CHILD_PROVIDER EXPECTED_CHILD_MODEL PARENT_MODEL_SUBSTR
 DSH_HOME_REAL="$HOME/.dsh"
 DSH_HOME_TMP="$WORKSPACE/.dsh-home"
@@ -36,14 +39,14 @@ rm -rf "$DSH_HOME_REAL/sessions/$PROJECT_KEY" 2>/dev/null || true
 mkdir -p "$DSH_HOME_REAL/sessions/$PROJECT_KEY"
 
 echo "--- Test 1: subagent_preset different model ---"
-cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 90 dsh --profile headless "Use subagent_preset to write /tmp/headless_verify_different_model.txt with content 'hello-different-model' and report file was written. Also report your model." 2>&1 | tee /tmp/verify1.txt
+cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 240 $DSH_BIN --profile headless "Use subagent_preset to write /tmp/headless_verify_different_model.txt with content 'hello-different-model' and report file was written. Also report your model." 2>&1 | tee /tmp/verify1.txt
 cat /tmp/verify1.txt | head -n 50
 if ! grep -q "hello-different-model" /tmp/verify1.txt; then echo "FAIL: subagent did not write file"; exit 1; fi
 if ! grep -q "$PARENT_MODEL_SUBSTR" /tmp/verify1.txt; then echo "FAIL: parent model not reported"; exit 1; fi
 echo "PASS: subagent_preset file write and parent model reported"
 
 echo "--- Test 2: crew_materialize different model ---"
-cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 60 dsh --profile headless "Use crew_materialize for engineering and then crew_status to report. Do not do handoff." 2>&1 | tee /tmp/verify2.txt
+cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 180 $DSH_BIN --profile headless "Use crew_materialize for engineering and then crew_status to report. Do not do handoff." 2>&1 | tee /tmp/verify2.txt
 cat /tmp/verify2.txt | head -n 50
 if ! grep -q "planner" /tmp/verify2.txt; then echo "FAIL: crew not materialized"; exit 1; fi
 echo "PASS: crew materialized"

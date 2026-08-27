@@ -35,6 +35,15 @@ export interface CrewRole {
   readonly provider?: string
   readonly model?: string
   readonly maxTokens?: number
+  /**
+   * Optional role tool scoping, applied as the child's scoped `tools.restrict()`.
+   * This matters on deployments whose model-facing tools sit in the HOST plane
+   * (every CLI/headless profile): there a preset join is additive — the child
+   * keeps seeing the global registry — so without an explicit filter a "slim"
+   * preset silently yields the parent's full tool set. On the web plane the
+   * preset owns the tools and the filter is a no-op for the same names.
+   */
+  readonly toolFilter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
   /** The role's standing task statement, prepended to its scoped turns. */
   readonly roleTask: string
   /** Human-facing description surfaced by the crew tools. */
@@ -123,6 +132,32 @@ export class CrewService extends Service {
 
   listCrews(): string[] {
     return [...this.crews.keys()]
+  }
+
+  /**
+   * Re-read crew definitions from a fresh resolved config. Called from the
+   * settings `onChange` hook: a live Settings edit must reach the NEXT
+   * materialize() without a restart, because materialize() composes members
+   * from the CURRENT role definitions (preset, route, filter, roleTask).
+   * Definitions update in place; live members keep their materialized
+   * composition until the next fresh start (a config change never revokes a
+   * running member), which matches how one-shot/continuable routes treat the
+   * settings: "the next child follows the resolved settings."
+   */
+  reloadCrews(crewsConfig: NonNullable<PluginConfig['crews']>): void {
+    for (const [crewName, entry] of Object.entries(crewsConfig)) {
+      const crew = toCrew(crewName, entry as CrewConfigEntry)
+      this.crews.set(crewName, crew)
+      if (!this.members.has(crewName)) this.members.set(crewName, new Map())
+      this.taskState.set(crewName, buildTaskState(crew))
+      this.pipelineState.set(crewName, initPipelineState(crew))
+    }
+    // Crews removed from settings disappear from the roster. Members already
+    // materialized keep running (durable continuable children are the
+    // manager's, not the roster's) but no new handoffs resolve against them.
+    for (const crewName of [...this.crews.keys()]) {
+      if (!(crewName in crewsConfig)) this.crews.delete(crewName)
+    }
   }
 
   roles(crew: string): readonly string[] {
@@ -261,6 +296,9 @@ export class CrewService extends Service {
             : {}),
         },
         presetId: def.presetId ?? config.presetId,
+        // Role tool scoping (see CrewRole.toolFilter): without it a host-plane
+        // deployment hands every role the parent's full global tool set.
+        ...(def.toolFilter !== undefined ? { toolFilter: def.toolFilter } : {}),
       }
       const res = await this.ctx.subagents.startContinuable({
         provider,
@@ -502,6 +540,7 @@ function toCrew(name: string, entry: CrewConfigEntry): Crew {
       provider: r.provider,
       model: r.model,
       maxTokens: r.maxTokens,
+      toolFilter: r.toolFilter,
       roleTask: r.roleTask,
       description: r.description,
       tasks: (r.tasks ?? []) as readonly Task[],

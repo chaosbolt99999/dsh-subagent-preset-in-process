@@ -46,8 +46,13 @@ export function apply(ctx: Context, config: ConfigType): void {
       current = get()
     },
     onChange: () => {
-      // Resolved value already captured by setSource; crew role definitions are
-      // re-read from `current` on the next `materialize()`/`handoff()`.
+      // Resolved value already captured by setSource. Role/task definitions are
+      // re-read from `current` on the next materialize(), so adding a crew or
+      // editing role pins through Settings takes effect on the next
+      // materialize — but `CrewService` intentionally keeps its constructor
+      // crew set, so renaming/removing crews still needs a restart. Live crew
+      // definitions ARE picked up here for crews the service already knows.
+      crews.reloadCrews(current.crews ?? {})
     },
   })
 }

@@ -117,3 +117,54 @@ describe('PresetInProcessProvider', () => {
     )
   })
 })
+
+describe('PresetInProcessProvider.start composition', () => {
+  /** Capture what `start` passes to `agents.create` without driving a real agent. */
+  function captureCreate() {
+    const calls: any[] = []
+    const parent = {
+      ctx: {
+        get: () => undefined,
+        agents: {
+          create: (opts: any) => {
+            calls.push(opts)
+            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [] } }, dispose: async () => {} })
+          },
+        },
+      },
+      session: {
+        events: [],
+        header: { delegationDepth: 0 },
+      },
+      options: { provider: 'parent-prov', model: 'parent-model' },
+      id: 'parent-session',
+    } as never
+    return { calls, parent }
+  }
+
+  it('honors a per-request presetId over the configured default', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({
+      prompt: [{ type: 'text', text: 'hi' }],
+      parent,
+      signal: new AbortController().signal,
+      presetId: 'custom-preset',
+      descriptor: { version: 2, mode: 'one-shot', provider: 'preset' } as never,
+    } as never)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].meta.agentPreset, 'custom-preset')
+  })
+
+  it('records the configured preset id when the request names none', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({
+      prompt: [{ type: 'text', text: 'hi' }],
+      parent,
+      signal: new AbortController().signal,
+      descriptor: { version: 2, mode: 'one-shot', provider: 'preset' } as never,
+    } as never)
+    assert.equal(calls[0].meta.agentPreset, 'subagent-slim')
+  })
+})

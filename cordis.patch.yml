@@ -14,8 +14,8 @@
     # preset every (non-crew) child is composed under; `provider`/`model` are
     # the base route — Settings → Plugins overrides them live and every child
     # follows the resolved values. `crews` declares role-bound continuable
-    # workers: each role has its own preset, optional model route, and a
-    # `roleTask` delivered on every turn; `orchestratorRole` routes handoffs.
+    # workers: each role has its own preset, optional model route, an optional
+    # `toolFilter`, and a `roleTask` delivered on every turn.
     - id: subagent-preset-in-process
       name: 'dsh-subagent-preset-in-process'
       config:
@@ -23,53 +23,71 @@
         presetId: subagent-slim
         # Base route only — Settings → Plugins overrides it live, and EVERY
         # child (one-shot, continuable, crew) follows the resolved settings.
-        provider: custom2
-        model: x-preview-f-free
+        provider: merge
+        model: deepseek/deepseek-v4-flash-0731
         crews:
-          # Routed crew (model chooses next role; add mode: pipeline for deterministic chain)
+          # Routed crew (model chooses next role; add mode: pipeline for deterministic chain).
+          # `toolFilter.allow` pins each role to the slim preset's tool set — REQUIRED on
+          # host-plane deployments (CLI/headless): there the preset join is additive, so
+          # without a filter every role silently sees the parent's full global tool set.
+          # On the web plane the same names are no-ops (the preset owns those tools).
           engineering:
             mode: routed
             orchestratorRole: orchestrator
             roles:
               - name: planner
                 presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
                 roleTask: Break the goal into ordered tasks and hand them to the orchestrator.
               - name: orchestrator
                 presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
                 roleTask: Route each task to the right role and track completion.
               - name: builder
                 presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
                 roleTask: Implement the assigned task and report the result.
               - name: verifier
                 presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
                 roleTask: Verify the builder's result against the task and report.
-          # Pipeline crew (deterministic order + verify-gate + structured tasks) — enable by
-          # switching engineering.mode to pipeline, or add as a second crew:
-          # engineering-pipeline:
-          #   mode: pipeline
-          #   roles:
-          #     - name: planner
-          #       presetId: subagent-slim
-          #       roleTask: Break the goal into tasks; hand T1 to builder.
-          #       tasks: [{ id: T1, title: Implement login, acceptanceCriteria: Tests pass, status: pending }]
-          #     - name: builder
-          #       presetId: subagent-slim
-          #       roleTask: Implement the task (evidence = diff / test report); hand to verifier.
-          #     - name: verifier
-          #       presetId: subagent-slim
-          #       roleTask: Verify T1 against acceptanceCriteria; call crew_verify with pass/fail.
-          #   pipeline: { order: [planner, builder, verifier], verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 } }
+          # Pipeline crew (deterministic order + verify-gate + structured tasks)
+          engineering-pipeline:
+            mode: pipeline
+            roles:
+              - name: planner
+                presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, todo_write] }
+                roleTask: Break the goal into tasks; hand T1 to builder.
+                tasks: [{ id: T1, title: Implement the requested change, acceptanceCriteria: Change implemented and reported, status: pending }]
+              - name: builder
+                presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
+                roleTask: Implement the task (evidence = what you changed); hand to verifier.
+              - name: verifier
+                presetId: subagent-slim
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
+                roleTask: Verify T1 against acceptanceCriteria; call crew_verify with pass/fail.
+            pipeline: { order: [planner, builder, verifier], verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 } }
+          # A second pipeline crew can be declared the same way; switching
+          # engineering.mode to pipeline makes that crew deterministic too.
 
     # ── the model-facing delegation tool ───────────────────────────────────
     # Additional `tool-subagent` instance (distinct id from the base `tool-subagent`
     # row that stays on `spawn`). Lets the model delegate through the pinned
-    # backend via the `subagent_preset` tool.
+    # backend via the `subagent_preset` tool. `toolFilter.allow` restates the slim
+    # preset's tool set so one-shot children are ALSO isolated on host-plane
+    # deployments (the continuable path gets the same filter from
+    # `prepareContinuable()`); the child-scope `report` tool is exempt from
+    # filtering (own-layer registration).
     - id: tool-subagent-preset
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
         provider: preset
         toolName: subagent_preset
         backgroundMode: continuable
+        toolFilter:
+          allow: [bash, read, write, edit, glob, grep, read_image, crew_wait, todo_write]
         # No static agentOptions: the route comes from the provider's detached
         # spec (live resolved settings), merged under any caller request. Add a
         # per-tool override here later for finer-grained control.

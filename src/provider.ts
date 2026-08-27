@@ -213,6 +213,11 @@ export class PresetInProcessProvider implements SubagentProvider {
     const childId = SessionId(randomUUID())
     const boundary = 0
     const inherited = captureDelegatedPolicyOverrides(parent)
+    // Per-request composition wins over the config default: a caller that names
+    // a presetId (or brings its own toolFilter) is pinning THIS child, not
+    // asking for the provider's base composition. Unset fields fall back to the
+    // configured preset/filter.
+    const presetId = request.presetId ?? config.presetId
     const forcedAgentOptions = {
       ...request.agentOptions,
       provider: config.provider,
@@ -221,7 +226,7 @@ export class PresetInProcessProvider implements SubagentProvider {
     }
     const meta = {
       ...childSessionMeta(parent, childDepth, boundary),
-      agentPreset: config.presetId,
+      agentPreset: presetId,
     }
 
     let structured: StructuredHandle | undefined
@@ -235,7 +240,7 @@ export class PresetInProcessProvider implements SubagentProvider {
         setup: async (childCtx: Context): Promise<void> => {
           const childSession = (childCtx.agent as Agent).session
           appendDelegatedPolicyOverrides(childSession, inherited)
-          await composeChildUnderPreset(childCtx, config.presetId, {
+          await composeChildUnderPreset(childCtx, presetId, {
             persona: request.persona,
             toolFilter: request.toolFilter,
           })

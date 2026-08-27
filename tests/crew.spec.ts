@@ -80,3 +80,31 @@ describe('CrewService', () => {
     assert.equal(svc.member('engineering', 'planner'), undefined)
   })
 })
+
+describe('CrewService.reloadCrews (live settings)', () => {
+  it('picks up an added crew and updated role pins without a restart', () => {
+    const svc = new CrewService(mockContext(), () => makeCrew())
+    const updated = Config({
+      presetId: 'subagent-slim',
+      crews: {
+        engineering: {
+          roles: [{ name: 'planner', presetId: 'slim-planner', roleTask: 'Plan work.' }],
+        },
+        support: {
+          roles: [{ name: 'triage', presetId: 'slim-triage', roleTask: 'Triage.' }],
+        },
+      },
+    })
+    svc.reloadCrews(updated.crews ?? {})
+    assert.deepEqual(svc.listCrews().sort(), ['engineering', 'support'])
+    assert.deepEqual(svc.roles('engineering'), ['planner'])
+    assert.deepEqual(svc.roles('support'), ['triage'])
+  })
+
+  it('drops removed crews from the roster', () => {
+    const svc = new CrewService(mockContext(), () => makeCrew())
+    const empty = Config({ presetId: 'subagent-slim', crews: {} })
+    svc.reloadCrews(empty.crews ?? {})
+    assert.deepEqual(svc.listCrews(), [])
+  })
+})

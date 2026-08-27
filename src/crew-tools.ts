@@ -340,15 +340,22 @@ export function registerCrewTools(ctx: Context, crews: CrewService): (() => void
       async execute(args: unknown, exec: ToolRunContext) {
         const a = args as { crew: string; role?: string }
         const roleNames = a.role !== undefined ? [a.role] : crews.roles(a.crew)
-        const settled = []
-        for (const role of roleNames) {
+        const members = roleNames.map((role) => {
           const member = crews.member(a.crew, role)
           if (member === undefined) {
             throw new Error(`crew "${a.crew}" role "${role}" is not materialized (call crew_materialize first)`)
           }
-          const result = await waitForSettlement(ctx, String(member.childId), exec.signal)
-          settled.push({ role, ...result })
-        }
+          return { role, member }
+        })
+        // All waits share one settled[] result. Each member's settlement is
+        // observed independently, so one slow role does not delay the others'
+        // liveness reads (they run concurrently, unlike the previous serial
+        // loop where a long first role skewed every later one).
+        const settled = await Promise.all(
+          members.map(({ role, member }) =>
+            waitForSettlement(ctx, String(member.childId), exec.signal).then((result) => ({ role, ...result })),
+          ),
+        )
         return { settled }
       },
     }),

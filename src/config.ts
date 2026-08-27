@@ -43,6 +43,12 @@ export const CrewRoleSchema = z.object({
     .min(1)
     .max(Number.MAX_SAFE_INTEGER)
     .description('Optional role output-token cap.'),
+  toolFilter: z
+    .object({
+      allow: z.array(z.string()).description('Global tool names the role keeps; everything else is removed.'),
+      deny: z.array(z.string()).description('Global tool names removed from the role.'),
+    })
+    .description('Optional role tool scoping (allow and/or deny). Required capability is always advertised.'),
   roleTask: z.string().required().description('Task statement delivered on every turn.'),
   description: z.string().description('Human-facing role description.'),
   tasks: z.array(TaskSchema).default([]).description('Structured task list for this role; gate checks the verifier against these.'),

@@ -29,11 +29,27 @@ export interface SettlementResult {
  * terminates the call — the authoritative output then reaches the parent
  * through the ordinary `subagent-settled` inbox notice.
  *
+ * The pre-`running` window is handled explicitly: `Agent.status` stays `idle`
+ * between a `followup()` and the first turn start, so a child that was JUST
+ * handed work reports `idle` here. Treating that as "settled" fabricates a
+ * `completed` before the turn ever ran. Instead the liveness read is retried
+ * after a macrotask boundary: an accepted turn flips the agent to `running` by
+ * then (and keeps it registered), while a truly settled Activation is disposed
+ * and gone from the registry. `crew_wait` additionally arms the listener and
+ * takes its first liveness read BEFORE the handoff is delivered, so the race
+ * window it guards cannot open in the first place.
+ *
  * @param ctx - the plugin's host context (`ctx.agents`, `ctx.on`).
  * @param childId - the durable continuable child session id.
  * @param signal - the calling tool's cancellation signal.
+ * @param opts - `timeoutMs` bounds the whole wait (0/undefined = unbounded).
  */
-export function waitForSettlement(ctx: any, childId: string, signal: AbortSignal): Promise<SettlementResult> {
+export function waitForSettlement(
+  ctx: any,
+  childId: string,
+  signal: AbortSignal,
+  opts?: { timeoutMs?: number },
+): Promise<SettlementResult> {
   return new Promise<SettlementResult>((resolve) => {
     let done = false
     let off: () => void = () => {}
@@ -41,6 +57,7 @@ export function waitForSettlement(ctx: any, childId: string, signal: AbortSignal
     const cleanup = () => {
       off()
       signal.removeEventListener('abort', onAbort)
+      if (timer !== undefined) clearTimeout(timer)
     }
     const finish = (info?: { stopReason?: string; lastAssistantMessage?: unknown[] }) => {
       if (done) return
@@ -70,38 +87,65 @@ export function waitForSettlement(ctx: any, childId: string, signal: AbortSignal
       return
     }
 
-    const child = ctx.agents?.get(childId)
-    if (child === undefined) {
-      // Not live: already settled (or this id is not a live child).
-      finish({ stopReason: 'completed' })
-      return
-    }
-    if (child.status !== 'running') {
-      // No active turn right now (waiting/idle): nothing to wait for.
-      finish({ stopReason: 'completed' })
-      return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    if (opts?.timeoutMs !== undefined && opts.timeoutMs > 0) {
+      timer = setTimeout(() => finish({ stopReason: 'timeout' }), opts.timeoutMs)
     }
 
-    // Running: wait for the turn to finish, then wait for the Activation to be
-    // disposed. The `subagent/end` edge above finishes the call with the exact
-    // stopReason; polling liveness is the fallback that still terminates even
-    // when that scoped edge is not delivered to this context.
-    child.whenIdle().then(
-      () => {
-        const poll = () => {
-          if (done) return
-          if (ctx.agents?.get(childId) === undefined) {
-            // Disposed: the settlement notice has been delivered (it precedes
-            // the end edge). Give the edge one short grace to land its exact
-            // stopReason before the neutral fallback.
-            setTimeout(() => finish({ stopReason: 'completed' }), 120)
-            return
+    // One liveness probe: returns 'running' | 'quiescent' | 'gone'.
+    const probe = (): 'running' | 'quiescent' | 'gone' => {
+      const child = ctx.agents?.get(childId)
+      if (child === undefined) return 'gone'
+      return child.status === 'running' ? 'running' : 'quiescent'
+    }
+
+    /** Turn active: await it, then await Activation disposal (poll). */
+    const awaitTurn = (child: { whenIdle(): Promise<void> }) => {
+      child.whenIdle().then(
+        () => {
+          const poll = () => {
+            if (done) return
+            if (ctx.agents?.get(childId) === undefined) {
+              // Disposed: the settlement notice has been delivered (it precedes
+              // the end edge). Give the edge one short grace to land its exact
+              // stopReason before the neutral fallback.
+              setTimeout(() => finish({ stopReason: 'completed' }), 120)
+              return
+            }
+            setTimeout(poll, 40)
           }
-          setTimeout(poll, 40)
+          poll()
+        },
+        () => finish({ stopReason: 'aborted' }),
+      )
+    }
+
+    // `idle` is ambiguous (see the module comment): re-read after a macrotask
+    // boundary before concluding the child is settled. An accepted-but-unstarted
+    // turn flips to `running` by then; a settled Activation is gone.
+    const awaitQuiescenceConfirmation = () => {
+      setTimeout(() => {
+        if (done) return
+        const state = probe()
+        if (state === 'running') {
+          awaitTurn(ctx.agents.get(childId))
+          return
         }
-        poll()
-      },
-      () => finish({ stopReason: 'aborted' }),
-    )
+        finish({ stopReason: 'completed' })
+      }, 0)
+    }
+
+    const initial = probe()
+    if (initial === 'gone') {
+      // Not live: already settled (or this id was never a live child). No
+      // turn can start anymore, so `completed` cannot be a fabrication.
+      finish({ stopReason: 'completed' })
+      return
+    }
+    if (initial === 'running') {
+      awaitTurn(ctx.agents.get(childId))
+      return
+    }
+    awaitQuiescenceConfirmation()
   })
 }
