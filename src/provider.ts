@@ -6,13 +6,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   appendDelegatedPolicyOverrides,
+  applyPresetChildComposition,
   assertSubagentMaxDepth,
   captureDelegatedPolicyOverrides,
   childSessionMeta,
   finalAssistantOutput,
   resolveChildAgentOptions,
   resolveChildDepth,
-  type ChildComposition,
   type ResolvedSubagentStartRequest,
   type SubagentProvider,
   type SubagentResult,
@@ -20,6 +20,7 @@ import {
   type SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import { attachStructuredRuntime, type StructuredHandle } from './structured.js'
+import { clipToolFilterIfKnown } from './plane.js'
 import type { Config } from './config.js'
 
 // Load the cordis context augmentations the setup callback relies on
@@ -28,14 +29,6 @@ import type { Config } from './config.js'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
-
-/**
- * Model-facing delegation-scope statement. Mirrors `SUBAGENT_DELEGATION_CONTEXT`
- * from `@deepseek-ai/dsh-subagent/child-agent` (not re-exported from the package
- * root), so child prompt reconstruction stays byte-identical to the shared driver.
- */
-const SUBAGENT_DELEGATION_CONTEXT =
-  'You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session — operations that require approval are rejected automatically. When the task needs access beyond that scope, do not retry the denied operation; state the limitation in your reply so the delegating agent can handle it.'
 
 /** Map a session turn outcome to the subagent seam's terminal vocabulary. */
 function toStopReason(reason: { kind: string } | undefined): SubagentStopReason {
@@ -56,40 +49,6 @@ function toStopReason(reason: { kind: string } | undefined): SubagentStopReason 
 /** Error used when cancellation wins before the child publication boundary. */
 function prePublicationAbort(): Error {
   return new Error('subagent request was aborted before child publication')
-}
-
-/**
- * Compose one child under a NAMED preset instead of inheriting the parent's
- * composition. This replaces `applyChildComposition`'s `composeFrom` join with
- * `AgentPresets.mount`, then applies the same delegation-context statement and
- * per-child persona/tool-filter. Async because `mount` resolves and mounts the
- * preset's standing composition.
- */
-async function composeChildUnderPreset(
-  childCtx: Context,
-  presetId: string,
-  composition: ChildComposition,
-): Promise<void> {
-  const presets = childCtx.get('agentPresets') as AgentPresets | undefined
-  if (presets === undefined) {
-    throw new Error('subagent preset pinning requires the agent-presets roster')
-  }
-  await presets.mount(childCtx, presetId)
-  childCtx.systemPrompt.context({
-    name: 'subagent:delegation',
-    order: 120,
-    text: SUBAGENT_DELEGATION_CONTEXT,
-  })
-  if (composition.persona !== undefined) {
-    childCtx.systemPrompt.section({
-      name: 'deployment:persona',
-      order: 0,
-      text: composition.persona,
-    })
-  }
-  if (composition.toolFilter !== undefined) {
-    childCtx.tools.restrict(composition.toolFilter)
-  }
 }
 
 /**
@@ -231,6 +190,16 @@ export class PresetInProcessProvider implements SubagentProvider {
 
     let structured: StructuredHandle | undefined
 
+    // Cross-plane filter safety: the configured filter names headless-plane
+    // tools (`todo_write`, `get_goal`) that the web plane does not register
+    // globally. Clip against the registry this child will actually be
+    // composed on (the parent's global layer is the child's inherited layer)
+    // so `tools.restrict()`'s fail-loud validation never kills a delegation
+    // over a name that could not exist in the child's view anyway.
+    const planeSafeToolFilter = request.toolFilter !== undefined
+      ? clipToolFilterIfKnown(request.toolFilter, parent.ctx)
+      : undefined
+
     return parent.ctx.agents
       .create({
         sessionId: childId,
@@ -240,9 +209,9 @@ export class PresetInProcessProvider implements SubagentProvider {
         setup: async (childCtx: Context): Promise<void> => {
           const childSession = (childCtx.agent as Agent).session
           appendDelegatedPolicyOverrides(childSession, inherited)
-          await composeChildUnderPreset(childCtx, presetId, {
+          await applyPresetChildComposition(childCtx, presetId, {
             persona: request.persona,
-            toolFilter: request.toolFilter,
+            toolFilter: planeSafeToolFilter,
           })
           if (request.outputSchema !== undefined) {
             structured = attachStructuredRuntime(childCtx, request.outputSchema)

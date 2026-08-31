@@ -119,3 +119,45 @@ plugin `tsc --noEmit` clean and 25/25 unit tests. The change is an uncommitted
 working-tree diff on the checkout — review with `git -C /home/chaosbolt/deepseek-harness diff`,
 and re-apply after any `git pull` that touches these files. A `pnpm dsh web`
 restart activates it.
+
+## Cross-plane tool-filter sanitization (2026-08-31, patch item 6b)
+
+Revalidation on the web plane exposed a real defect: every delegation through
+the plugin failed with
+`tools.restrict() names unknown global tool "todo_write"` (and `get_goal` on
+crew roles). Cause: the plugin's filters (added 2026-08-27 for host-plane tool
+isolation) are authored for the **headless** global registry, which registers
+`todo_write`/`get_goal` globally — the **web** plane's registry does not, and
+`tools.restrict()` fails loud on unknown names.
+
+Fix (two pieces, both additive):
+
+1. `@deepseek-ai/dsh-tools` (`packages/core/tools/src/index.ts`) — new public
+   `ToolRuntime.restrictableNames(scope?)`: the pre-restriction global names a
+   scoped restriction may name for the viewed scope (global registry when
+   omitted). Read-only; no behavior change.
+
+2. `@deepseek-ai/dsh-subagent` (`packages/subagent/subagent/src/child-agent.ts`)
+   — `sanitizePresetChildToolFilter` clips a pinned child's filter against the
+   child scope's restrictable names before `tools.restrict()`, applied ONLY in
+   `applyPresetChildComposition` (the preset-pinned seam introduced by this
+   patch). The inherit path (`applyChildComposition`) is deliberately
+   untouched: the upstream fail-loud unknown-name contract is pinned by
+   `subagent-spawn-in-process.spec.ts` and
+   `subagent-in-process-driver.spec.ts`, and both suites keep passing.
+   Clipping never widens the child (dropped names cannot exist in its view
+   anyway); an allowlist that clips to empty still throws (material
+   cross-plane misconfiguration).
+
+The plugin also pre-clips its own filters defensively at delegation time
+(`src/plane.ts` `clipToolFilterIfKnown`, used by the provider `start()` and
+`CrewService.materialize()`), which covers hosts whose tools facade predates
+`restrictableNames()` and keeps the cold-resume path (shared seam) as the
+authoritative sanitizer.
+
+Verified: harness `packages/core/tools` + `packages/subagent` 1051/1051 green
+(fail-loud inherit-path tests intact); plugin `tsc --noEmit` clean, 31/31 unit
+tests; headless regression re-run post-fix — one-shot + crew materialize clean,
+6/6 children log-asserted on `ccode/deepseek/deepseek-v4-flash` @
+`subagent-slim` (depth 1). Web plane requires a `pnpm dsh web` restart to load
+the rebuilt libs.
