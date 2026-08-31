@@ -149,11 +149,18 @@ Fix (two pieces, both additive):
    anyway); an allowlist that clips to empty still throws (material
    cross-plane misconfiguration).
 
-The plugin also pre-clips its own filters defensively at delegation time
-(`src/plane.ts` `clipToolFilterIfKnown`, used by the provider `start()` and
-`CrewService.materialize()`), which covers hosts whose tools facade predates
-`restrictableNames()` and keeps the cold-resume path (shared seam) as the
-authoritative sanitizer.
+Vantage-point note (learned the hard way): an earlier iteration also
+pre-clipped the plugin's filters at delegation time against
+`parent.ctx.tools.restrictableNames()` — the PARENT's global-only view. That
+is the wrong vantage point on planes whose tools are preset-mounted (web):
+the parent's global layer holds almost none of the model-facing tools, so the
+clip gutted a correct filter (the web child was left with `crew_wait` only).
+The child's own view — global registry PLUS the mounted preset's
+registrations — is only knowable after the mount, i.e. inside the compose.
+The shared `sanitizePresetChildToolFilter` is therefore the ONE seam; the
+plugin passes role/row filters through unclipped (`src/plane.ts` was
+removed), and hosts whose facade predates `restrictableNames()` simply get
+the pre-patch fail-loud behavior.
 
 Verified: harness `packages/core/tools` + `packages/subagent` 1051/1051 green
 (fail-loud inherit-path tests intact); plugin `tsc --noEmit` clean, 31/31 unit

@@ -4,7 +4,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Config as PluginConfig, Task } from './config.js'
-import { clipToolFilterIfKnown } from './plane.js'
 
 /**
  * Crew orchestration: a named set of role-bound, continuously-resident child
@@ -298,14 +297,12 @@ export class CrewService extends Service {
         },
         presetId: def.presetId ?? config.presetId,
       // Role tool scoping (see CrewRole.toolFilter): without it a host-plane
-      // deployment hands every role the parent's full global tool set. The
-      // filter is clipped against the parent plane's restrictable global names
-      // first (see `clipToolFilterIfKnown`): the web plane registers a different
-      // global tool set than headless, and `tools.restrict()` fails loud on
-      // names the child's scope could never restrict anyway.
-      ...(def.toolFilter !== undefined
-        ? { toolFilter: clipToolFilterIfKnown(def.toolFilter, parent.ctx) }
-        : {}),
+      // deployment hands every role the parent's full global tool set. Passed
+      // through unclipped: the preset-pinned compose seam sanitizes the filter
+      // against the child's OWN view (global registry plus the mounted preset's
+      // registrations) at application time — the parent's global-only view is
+      // the wrong vantage point on planes whose tools are preset-mounted.
+      ...(def.toolFilter !== undefined ? { toolFilter: def.toolFilter } : {}),
       }
       const res = await this.ctx.subagents.startContinuable({
         provider,

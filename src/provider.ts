@@ -20,7 +20,6 @@ import {
   type SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import { attachStructuredRuntime, type StructuredHandle } from './structured.js'
-import { clipToolFilterIfKnown } from './plane.js'
 import type { Config } from './config.js'
 
 // Load the cordis context augmentations the setup callback relies on
@@ -190,16 +189,6 @@ export class PresetInProcessProvider implements SubagentProvider {
 
     let structured: StructuredHandle | undefined
 
-    // Cross-plane filter safety: the configured filter names headless-plane
-    // tools (`todo_write`, `get_goal`) that the web plane does not register
-    // globally. Clip against the registry this child will actually be
-    // composed on (the parent's global layer is the child's inherited layer)
-    // so `tools.restrict()`'s fail-loud validation never kills a delegation
-    // over a name that could not exist in the child's view anyway.
-    const planeSafeToolFilter = request.toolFilter !== undefined
-      ? clipToolFilterIfKnown(request.toolFilter, parent.ctx)
-      : undefined
-
     return parent.ctx.agents
       .create({
         sessionId: childId,
@@ -211,7 +200,7 @@ export class PresetInProcessProvider implements SubagentProvider {
           appendDelegatedPolicyOverrides(childSession, inherited)
           await applyPresetChildComposition(childCtx, presetId, {
             persona: request.persona,
-            toolFilter: planeSafeToolFilter,
+            toolFilter: request.toolFilter,
           })
           if (request.outputSchema !== undefined) {
             structured = attachStructuredRuntime(childCtx, request.outputSchema)
