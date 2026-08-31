@@ -162,9 +162,21 @@ plugin passes role/row filters through unclipped (`src/plane.ts` was
 removed), and hosts whose facade predates `restrictableNames()` simply get
 the pre-patch fail-loud behavior.
 
+Follow-up (same day): the sanitizer's first cut called
+`restrictableNames()` WITHOUT a scope — the optional-argument form answers the
+global registry, which on the web plane holds almost none of the model-facing
+tools — so the web child's correct filter was gutted to `crew_wait` alone
+(turn still completed; caught by decoding the child's `request/header`). The
+sanitizer now passes the CHILD's scope key, so the known set is the chain view:
+global registry plus the mounted preset's registrations. Headless re-verified
+(9/9 authored tools survive), web re-verified after restart (8/8, no
+`todo_write` — it genuinely does not exist there). Lesson: on preset-mounted
+planes the only valid vantage point for filter validation is the child's OWN
+post-mount view.
+
 Verified: harness `packages/core/tools` + `packages/subagent` 1051/1051 green
 (fail-loud inherit-path tests intact); plugin `tsc --noEmit` clean, 31/31 unit
-tests; headless regression re-run post-fix — one-shot + crew materialize clean,
-6/6 children log-asserted on `ccode/deepseek/deepseek-v4-flash` @
-`subagent-slim` (depth 1). Web plane requires a `pnpm dsh web` restart to load
-the rebuilt libs.
+tests; headless one-shot + crew re-run post-fix, children log-asserted on
+`ccode/deepseek/deepseek-v4-flash` @ `subagent-slim` (depth 1, full authored
+tool set). Web plane requires a `pnpm dsh web` restart to load the rebuilt
+libs.
