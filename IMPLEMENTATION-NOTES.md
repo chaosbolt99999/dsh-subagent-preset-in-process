@@ -604,8 +604,16 @@ child.
   Settings); both roles settled `completed` with `ACK`; the marker file was
   written (`override-ok`). `crew_status` reported the same per-role routes.
 - **Pre-fix run:** same script against HEAD's `src/provider.ts` fails exactly the
-  row assertion (`the one-shot child of the pinned tool row never ran on …`) while
-  the crew assertions still pass — the bug was one-shot-only, as diagnosed.
+  row assertion (`the one-shot child of the pinned tool row never ran on
+  deepseek/deepseek-v4-flash-0731 (saw: merge/zai/glm-5.3-flash) — the row-level
+  override was discarded`) while the crew assertions still pass — the bug was
+  one-shot-only, as diagnosed.
+- **No-leak regression:** a parallel headless run of the *deployment's own*
+  `engineering` crew (settings config, per-role `toolFilter`, NO route overrides)
+  materialized all four roles on the Settings route `merge/zai/glm-5.3-flash`,
+  and `subagent_preset` one-shot children likewise — the per-row/per-role
+  override does not leak into un-overridden children (checked from the same
+  post-fix build).
 
 ### 12.6 Deployment fix required by the round (headless was broken)
 

@@ -38,14 +38,15 @@ mounts a *named* preset for a child. This plugin fills that gap: it mounts
 `config.presetId` for every child (via `AgentPresets.mount`, not inheritance)
 and resolves every child's route from the plugin's live resolved config.
 
-## Model route — follows Settings (2026-08-26, route = merge/dsv4f since 2026-08-27)
+## Model route — follows Settings
 
 Every child — one-shot, continuable (`backgroundMode: continuable`), and crew
 member — gets its provider/model from ONE place: the plugin's resolved settings
 (composition base + the `subagent-preset-in-process` Settings namespace). A
-Settings → Plugins edit applies to the next child with no restart. The current
-deployment routes every child through `merge/deepseek/deepseek-v4-flash-0731`
-(merge gateway, dsv4f) over a `zai/glm-5.3-flash` parent.
+Settings → Plugins edit applies to the next child with no restart. (On the
+reference deployment the settings route is `merge/zai/glm-5.3-flash`; the
+per-row / per-role overrides below are verified against exactly that, pinning
+children to `merge/deepseek/deepseek-v4-flash-0731` instead.)
 
 Route precedence (highest first):
 
@@ -416,11 +417,19 @@ do not).
 ## Development
 
 ```bash
-npm install            # installs typescript, vitest, @types/node + peers
-npx tsc --noEmit       # typecheck
-npx vitest run         # unit tests
-npx tsc                # emit dist/
+npm install              # typescript, vitest, esbuild, @types/node
+npm run typecheck        # tsc --noEmit
+npm test                 # vitest run
+npm run build            # tsc -> dist/ + scripts/build-client.mjs -> lib/client.js
+npm run verify:override  # live headless end-to-end proof of the route override
+npm run verify:route     # live headless proof of preset pinning + settings routes
 ```
+
+`scripts/verify-route-override.sh` boots a real headless DSH with a `--patch`
+overlay (a pinned `tool-subagent` row + a two-role crew where only one role pins
+a model), then decodes the per-frame `zstd` session logs and asserts each child's
+EFFECTIVE route. It needs a working profile and model credentials; it writes its
+overlay and logs under `/tmp/route-override-workspace`.
 
 ## Agent Note
 
@@ -459,7 +468,7 @@ logged: each child's `meta.agentPreset` is the durable composition record, and
 the descriptor is appended in the child's first turn; each crew handoff is a
 `followup` turn with a `coordinator` message source.
 
-**Verification** — `tsc --noEmit` clean; 64/64 unit tests pass (Config defaults +
+**Verification** — `tsc --noEmit` clean; 67/67 unit tests pass (Config defaults +
 crew parsing incl. per-role toolFilter and per-role `agentOptions`, capability
 advertisement, `inheritsParentContext`, registry name, `prepareContinuable` spec
 = pinned presetId + settings-derived route incl. live route changes and
@@ -467,11 +476,23 @@ maxTokens passthrough, pre-publication abort, per-request `presetId` override in
 `start()`, **request-level route precedence: field-by-field override over the
 settings route for one-shot `start()` and for crew materialization, legacy flat
 role aliases, maxTokens inheritance when no source caps it, depth-cap
-tightening**, crew role/orchestrator resolution, self-handoff and unknown-crew
-rejection, `reloadCrews` live-settings tests, plus 10 pipeline/task/verify-gate
-tests for order, next/prev, task status, verify pass/fail, retry/block and
-handoff enforcement). The harness subagent workspaces pass 1051/1051 with the
-shared-runtime patch applied.
+tightening, and schema-omission guards** (`toolFilter`/`agentOptions` stay absent
+rather than becoming an empty allowlist), crew role/orchestrator resolution,
+self-handoff and unknown-crew rejection, `reloadCrews` live-settings tests, plus
+10 pipeline/task/verify-gate tests for order, next/prev, task status, verify
+pass/fail, retry/block and handoff enforcement). The harness subagent workspaces
+pass 1051/1051 with the shared-runtime patch applied.
+
+**Live end-to-end (2026-09-14)** — `scripts/verify-route-override.sh` passes
+(EXIT=0): the pinned row's one-shot child ran on `merge/deepseek/deepseek-v4-flash-0731`
+while Settings said `merge/zai/glm-5.3-flash`; the crew role carrying
+`agentOptions.model` ran on the override; its sibling role without one stayed on
+Settings; both roles settled `completed`. The SAME test fails on the pre-fix
+provider (`the one-shot child of the pinned tool row never ran on …`), which is
+the regression this round fixed. A parallel run of the deployment's own
+`engineering` crew (settings config, per-role `toolFilter`, no route overrides)
+materialized all four roles on `merge/zai/glm-5.3-flash` — the override does not
+leak into un-overridden children.
 
 **Run-from-source web smoke (2026-08-26)** — DSH booted from a source checkout
 (`pnpm dsh web`, release 0.1.1-rc.2) with this plugin linked into the `web`
