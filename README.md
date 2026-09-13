@@ -286,7 +286,7 @@ Four bugs found by live headless crew testing (full diagnosis in
    runs on settings change; the next `materialize()` uses the new definitions
    (resident members keep their composition).
 
-Unit tests: **31/31** (`crew.spec 8` + `provider.spec 13` + `pipeline.spec 10`).
+Unit tests at that point: **31/31** (`crew.spec 8` + `provider.spec 13` + `pipeline.spec 10`).
 
 ### Route-override round (2026-09-14)
 

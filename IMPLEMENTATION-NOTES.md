@@ -615,7 +615,26 @@ child.
   override does not leak into un-overridden children (checked from the same
   post-fix build).
 
-### 12.6 Deployment fix required by the round (headless was broken)
+### 12.6 Verification tooling fixed in the same round
+
+`scripts/verify-headless-different-model.sh` (the §8.1 script) reported a FALSE
+failure on this round's runs, for two independent reasons, both fixed:
+
+1. it scanned a HARDCODED session root (`sessions/--tmp-headless-workspace--`)
+   while a `pnpm --dir <checkout>`-launched run logs under the checkout's
+   ProjectKey — it now scans every project key for logs written after
+   `START_TS` (epoch MILLISECONDS; `date +%s%3N` emits a 19-digit value on this
+   host and silently filtered out every file);
+2. it required the child's route to appear in its `subagent/descriptor`, but a
+   ONE-SHOT descriptor carries no `agentProvider`/`agentModel` at all (the
+   service builds it without them) — a one-shot child's own first
+   `request/header` is the authoritative record. The check now accepts either.
+
+Re-run after the fixes: **EXIT=0** (parent `deepseek-v4.1-flash`, `subagent_preset`
+one-shot child + all four `engineering` crew members on the Settings route
+`merge/zai/glm-5.3-flash`, `subagent-slim` preset).
+
+### 12.7 Deployment fix required by the round (headless was broken)
 
 The first verification run could not materialize ANY preset:
 `Cannot find package 'dsh-tool-symbol-index'` — the user presets
@@ -629,7 +648,7 @@ route work but blocking it; the general rule is now in the plugin README: every
 preset a crew role pins must be mountable from the profile that runs the
 delegation.
 
-### 12.7 Vendored as a public GitHub plugin
+### 12.8 Vendored as a public GitHub plugin
 
 The plugin is published as its own repository (mirroring `dsh-tool-symbol-index`):
 `https://github.com/chaosbolt99999/dsh-subagent-preset-in-process`.
@@ -644,7 +663,7 @@ The plugin is published as its own repository (mirroring `dsh-tool-symbol-index`
   in-factory `"use strict"`, and `__toESM(require("react"), 1)`) — the committed
   `lib/client.js` had silently drifted from `src/client.tsx` before this round.
 
-### 12.8 Still open
+### 12.9 Still open
 
 - The running **web plane** keeps the plugin code loaded at its boot
   (2026-09-14 02:25): the fix reaches the GUI only after a `dsh web` restart

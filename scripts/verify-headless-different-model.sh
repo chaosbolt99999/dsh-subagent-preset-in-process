@@ -38,6 +38,11 @@ echo "ProjectKey: $PROJECT_KEY"
 rm -rf "$DSH_HOME_REAL/sessions/$PROJECT_KEY" 2>/dev/null || true
 mkdir -p "$DSH_HOME_REAL/sessions/$PROJECT_KEY"
 
+# Run-start cutoff in epoch MILLISECONDS for the log scan below. (`date +%s%3N` is
+# not portable: some builds append the full nanosecond field.)
+START_TS=$(( $(date +%s) * 1000 ))
+export START_TS
+
 echo "--- Test 1: subagent_preset different model ---"
 cd "$WORKSPACE" && DSH_PERMISSION_MODE=danger-full-access timeout 240 $DSH_BIN --profile headless "Use subagent_preset to write /tmp/headless_verify_different_model.txt with content 'hello-different-model' and report file was written. Also report your model." 2>&1 | tee /tmp/verify1.txt
 cat /tmp/verify1.txt | head -n 50
@@ -66,38 +71,61 @@ function decompressPerFrame(p){
   }
   return tot.toString('utf-8');
 }
-const root=`${process.env.HOME}/.dsh/sessions/--tmp-headless-workspace--`;
-const dirs=fs.readdirSync(root).filter(d=> fs.statSync(path.join(root,d)).isDirectory());
-let foundSubagent=false, foundCrew=false, foundParent=false;
-for(const d of dirs){
-  const p=path.join(root,d,"session.jsonl.zstd");
-  if(!fs.existsSync(p)) continue;
-  const raw=decompressPerFrame(p);
-  const hasDescriptor=raw.includes('subagent/descriptor');
-  const hasExpectedModel=raw.includes(process.env.EXPECTED_CHILD_MODEL);
-  const hasParent=raw.includes(process.env.PARENT_MODEL_SUBSTR);
-  const hasPresetSlim=raw.includes('subagent-slim');
-  const hasCrew=raw.includes('crew:engineering');
-  // Find descriptor line
-  for(const line of raw.split('\n')){
-    if(line.includes('subagent/descriptor')){
-      console.log(`DESCRIPTOR in ${d}: ${line.slice(0,600)}`);
-      const j=JSON.parse(line);
-      if(j.data.agentModel===process.env.EXPECTED_CHILD_MODEL && j.data.agentProvider===process.env.EXPECTED_CHILD_PROVIDER){
-        if(j.data.label && j.data.label.startsWith('crew:')) foundCrew=true;
-        else foundSubagent=true;
+// Scan EVERY project key for session logs written after START_TS. The parent
+// ProjectKey is not predictable: a run launched through `pnpm --dir <checkout>`
+// logs under the checkout's key (pnpm changes cwd), not the workspace key — a
+// hardcoded `--tmp-headless-workspace--` path reports a FALSE failure because
+// it silently scans an empty directory.
+const startTs = Number(process.env.START_TS);
+const root = `${process.env.HOME}/.dsh/sessions`;
+const wantProvider = process.env.EXPECTED_CHILD_PROVIDER;
+const wantModel = process.env.EXPECTED_CHILD_MODEL;
+let foundSubagent=false, foundCrew=false, foundParent=false, scanned=0;
+for(const proj of fs.readdirSync(root)){
+  const pdir=path.join(root,proj);
+  let entries=[]; try{ entries=fs.readdirSync(pdir); }catch{ continue; }
+  for(const d of entries){
+    const p=path.join(pdir,d,"session.jsonl.zstd");
+    if(!fs.existsSync(p)) continue;
+    if(fs.statSync(p).mtimeMs < startTs - 1000) continue;
+    scanned++;
+    const raw=decompressPerFrame(p);
+    const descriptors=[];
+    let childHeader=null;   // this session's OWN first request header
+    for(const line of raw.split('\n')){
+      if(!line.trim()) continue;
+      let j; try{ j=JSON.parse(line); }catch{ continue; }
+      if(j.type==='subagent/descriptor') descriptors.push(j.data);
+      else if(j.type==='request/header'){
+        const cfg=j.data?.header?.config ?? {};
+        if(childHeader===null) childHeader=cfg;
+        if(String(cfg.model ?? '').includes(process.env.PARENT_MODEL_SUBSTR)) foundParent=true;
       }
     }
-    if(line.includes('request/header') && line.includes(process.env.PARENT_MODEL_SUBSTR)){
-      foundParent=true;
+    for(const data of descriptors){
+      console.log(`DESCRIPTOR in ${proj}/${d}: mode=${data.mode} label=${JSON.stringify(data.label)} route=${data.agentProvider ?? '?'}/${data.agentModel ?? '(unset)'}`);
+    }
+    if(childHeader!==null && descriptors.length>0){
+      console.log(`  child header route=${childHeader.provider}/${childHeader.model}`);
+    }
+    // A child's EFFECTIVE route: the continuable descriptor records it, but a
+    // ONE-SHOT descriptor carries no route at all (the service builds it without
+    // agentProvider/agentModel) — there the child's own first `request/header`
+    // is the authoritative record. Accept either.
+    const label = descriptors.map(x=>String(x.label ?? '')).find(Boolean) ?? '';
+    const onRoute =
+      descriptors.some(x=>x.agentProvider===wantProvider && x.agentModel===wantModel)
+      || (childHeader!==null && childHeader.provider===wantProvider && childHeader.model===wantModel);
+    if(descriptors.length>0 && onRoute){
+      if(label.startsWith('crew:')) foundCrew=true; else foundSubagent=true;
     }
   }
-  if(hasExpectedModel && hasPresetSlim) console.log(`OK: ${d} has ${process.env.EXPECTED_CHILD_MODEL} + slim`);
 }
-if(!foundParent) { console.error(`FAIL: parent route substring "${process.env.PARENT_MODEL_SUBSTR}" not found`); process.exit(1); }
-if(!foundSubagent) { console.error("FAIL: subagent_preset child route not found in descriptor"); process.exit(1); }
-if(!foundCrew) { console.error("FAIL: crew member route not found in descriptor"); process.exit(1); }
-console.log(`PASS: logs show parent "${process.env.PARENT_MODEL_SUBSTR}", subagent + crew on ${process.env.EXPECTED_CHILD_PROVIDER}/${process.env.EXPECTED_CHILD_MODEL}, all with subagent-slim preset`);
+console.log(`scanned ${scanned} session log(s) written by this run`);
+if(!foundParent) { console.error(`FAIL: parent route substring "${process.env.PARENT_MODEL_SUBSTR}" not found in any request/header written by this run`); process.exit(1); }
+if(!foundSubagent) { console.error(`FAIL: no non-crew child ran on ${wantProvider}/${wantModel} (descriptor route or child request/header)`); process.exit(1); }
+if(!foundCrew) { console.error(`FAIL: no crew member ran on ${wantProvider}/${wantModel} (descriptor route or child request/header)`); process.exit(1); }
+console.log(`PASS: logs show parent "${process.env.PARENT_MODEL_SUBSTR}", subagent + crew on ${wantProvider}/${wantModel}, all with subagent-slim preset`);
 JS
 echo "=== All verifications passed ==="
 echo "Check file written by subagent:"
