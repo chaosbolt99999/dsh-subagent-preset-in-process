@@ -25,8 +25,7 @@ describe('Config', () => {
     assert.deepEqual(parsed.crews, {})
   })
 
-  it('parses a named crew with role presets', () => {
-    const parsed = Config({
+  it('parses a named crew with role presets', () => {    const parsed = Config({
       presetId: 'subagent-slim',
       crews: {
         engineering: {
@@ -43,6 +42,33 @@ describe('Config', () => {
     assert.deepEqual(Object.keys(parsed.crews), ['engineering'])
     assert.equal(parsed.crews.engineering.orchestratorRole, 'orchestrator')
     assert.equal(parsed.crews.engineering.roles.length, 4)
+  })
+
+  it('keeps an omitted role toolFilter and agentOptions ABSENT, never materialized', () => {
+    // Regression: Schemastery materializes an absent nested object as
+    // `{ allow: [], deny: [] }`, and an empty allowlist makes `tools.restrict()`
+    // strip every tool from the role (live failure: "the filter was authored for
+    // a different plane"). Omission must mean "no scoping".
+    const parsed = Config({
+      presetId: 'subagent-slim',
+      crews: { engineering: { roles: [{ name: 'planner', presetId: 'slim', roleTask: 'Plan.' }] } },
+    })
+    const role = parsed.crews.engineering.roles[0]
+    assert.equal(role.toolFilter, undefined)
+    assert.equal(role.agentOptions, undefined)
+    assert.equal('toolFilter' in role, false, 'the key must be absent, never an empty allowlist')
+  })
+
+  it('keeps a role toolFilter that IS declared', () => {
+    const parsed = Config({
+      presetId: 'subagent-slim',
+      crews: {
+        engineering: {
+          roles: [{ name: 'builder', presetId: 'slim', roleTask: 'Build.', toolFilter: { allow: ['bash', 'read'] } }],
+        },
+      },
+    })
+    assert.deepEqual(parsed.crews.engineering.roles[0].toolFilter, { allow: ['bash', 'read'], deny: [] })
   })
 })
 
@@ -166,5 +192,102 @@ describe('PresetInProcessProvider.start composition', () => {
       descriptor: { version: 2, mode: 'one-shot', provider: 'preset' } as never,
     } as never)
     assert.equal(calls[0].meta.agentPreset, 'subagent-slim')
+  })
+})
+
+describe('PresetInProcessProvider.start request-level route override', () => {
+  /** Capture what `start` passes to `agents.create` without driving a real agent. */
+  function captureCreate(parentOptions: Record<string, unknown> = { provider: 'parent-prov', model: 'parent-model' }) {
+    const calls: any[] = []
+    const parent = {
+      ctx: {
+        get: () => undefined,
+        agents: {
+          create: (opts: any) => {
+            calls.push(opts)
+            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [] } }, dispose: async () => {} })
+          },
+        },
+      },
+      session: { events: [], header: { delegationDepth: 0 } },
+      options: parentOptions,
+      id: 'parent-session',
+    } as never
+    return { calls, parent }
+  }
+
+  const request = (extra: Record<string, unknown>) => ({
+    prompt: [{ type: 'text', text: 'hi' }],
+    parent: undefined as never,
+    signal: new AbortController().signal,
+    descriptor: { version: 2, mode: 'one-shot', provider: 'preset' } as never,
+    ...extra,
+  })
+
+  it('applies the settings route when the request carries no override', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({}), parent } as never)
+    assert.equal(calls[0].agentOptions.provider, 'deepseek-official')
+    assert.equal(calls[0].agentOptions.model, 'deepseek-v4-flash')
+    assert.equal(calls[0].agentOptions.subagentDepth, 1)
+  })
+
+  it('lets a request-level model override win over the settings route (the old bug)', async () => {
+    // Before the fix, `start()` wrote config.provider/model OVER the request's
+    // agentOptions, so a row-level override was silently discarded.
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({ agentOptions: { model: 'gpt-5.6-sol' } }), parent } as never)
+    assert.equal(calls[0].agentOptions.model, 'gpt-5.6-sol')
+    assert.equal(calls[0].agentOptions.provider, 'deepseek-official', 'the untouched field still follows settings')
+  })
+
+  it('lets a request-level provider override win over the settings route', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({ agentOptions: { provider: 'ccode' } }), parent } as never)
+    assert.equal(calls[0].agentOptions.provider, 'ccode')
+    assert.equal(calls[0].agentOptions.model, 'deepseek-v4-flash')
+  })
+
+  it('lets a request-level maxTokens override the settings cap', async () => {
+    const p = new PresetInProcessProvider('preset', () => ({ ...cfg, maxTokens: 4096 }) as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({ agentOptions: { maxTokens: 8192 } }), parent } as never)
+    assert.equal(calls[0].agentOptions.maxTokens, 8192)
+  })
+
+  it('inherits the parent maxTokens when neither the request nor the settings cap it', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate({ provider: 'parent-prov', model: 'parent-model', maxTokens: 1234 })
+    await p.start({ ...request({}), parent } as never)
+    assert.equal(calls[0].agentOptions.maxTokens, 1234)
+  })
+
+  it('keeps the settings model when the request overrides only the provider', async () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({ agentOptions: { provider: 'ccode' } }), parent } as never)
+    assert.deepEqual(
+      { provider: calls[0].agentOptions.provider, model: calls[0].agentOptions.model },
+      { provider: 'ccode', model: 'deepseek-v4-flash' },
+    )
+  })
+
+  it('tightens the depth cap to the request value when it is stricter than the config', async () => {
+    const p = new PresetInProcessProvider('preset', () => ({ ...cfg, maxDepth: 5 }) as never)
+    const { calls, parent } = captureCreate()
+    await p.start({ ...request({ maxDepth: 1 }), parent } as never)
+    // childDepth = parent depth (0) + 1 = 1, which the request's cap of 1 allows
+    assert.equal(calls[0].agentOptions.subagentDepth, 1)
+  })
+
+  it('rejects a child the effective depth cap forbids', () => {
+    // `start()` is a plain function whose pre-publication guards throw
+    // synchronously; the service awaits it, so the throw rejects `start()`.
+    const p = new PresetInProcessProvider('preset', () => ({ ...cfg, maxDepth: 5 }) as never)
+    const { parent } = captureCreate()
+    assert.throws(() => p.start({ ...request({ maxDepth: 0 }), parent } as never), /exceeds maxDepth/)
   })
 })

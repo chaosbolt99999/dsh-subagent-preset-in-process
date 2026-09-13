@@ -90,7 +90,8 @@ export function registerCrewTools(ctx: Context, crews: CrewService): (() => void
     }),
     ctx.tools.register({
       name: 'crew_status',
-      description: 'List the named crews, their roles, orchestrator, mode, pipeline order and verify-gate.',
+      description:
+        'List the named crews, their roles, orchestrator, mode, the effective per-role model routes (request-level agentOptions over the plugin settings), live members, pipeline order and verify-gate.',
       parameters: {
         type: 'object',
         properties: {},
@@ -107,11 +108,23 @@ export function registerCrewTools(ctx: Context, crews: CrewService): (() => void
           crews: crews.listCrews().map((name) => {
             const c = crews.crew(name)
             const cursor = crews.pipelineCursor(name)
+            const roleRoutes: Record<string, unknown> = {}
+            for (const role of crews.roles(name)) roleRoutes[role] = crews.roleRoute(name, role)
             return {
               name,
               roles: crews.roles(name),
               orchestrator: crews.orchestrator(name),
               mode: c.mode,
+              // The EFFECTIVE per-role route for the next materialize: the role's
+              // request-level agentOptions over the live plugin settings. Lets an
+              // override (or a settings change) be verified without decoding logs.
+              routes: roleRoutes,
+              members: crews.liveMembers(name).map((m) => ({
+                role: m.role,
+                childId: String(m.childId),
+                presetId: m.presetId,
+                route: m.route,
+              })),
               pipeline: {
                 order: [...crews.pipelineOrder(name)],
                 verifyGate: { ...c.pipeline.verifyGate },

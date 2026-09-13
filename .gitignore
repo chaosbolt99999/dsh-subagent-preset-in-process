@@ -1,5 +1,7 @@
+# node_modules is local; the BUILT runtime (dist/) and the bundled browser half
+# (lib/client.js) are committed on purpose, so the repository is directly usable
+# as a DSH plugin bundle and as a `link:`/git dependency. Rebuild them with
+# `npm run build`.
 node_modules/
-dist/
-lib/
 *.log
 .DS_Store

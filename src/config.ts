@@ -31,24 +31,47 @@ export const TaskSchema = z.object({
 
 export type Task = ReturnType<typeof TaskSchema>
 
-/** One role in a crew. */
-export const CrewRoleSchema = z.object({
-  name: z.string().required().description('Stable role name (planner/orchestrator/builder/verifier).'),
-  presetId: z.string().required().description('Agent preset this role is composed under.'),
-  provider: z.string().description('Optional role model-provider override.'),
-  model: z.string().description('Optional role model override.'),
+/** A crew role's per-role model-route override (the request-level knob). */
+export const RoleAgentOptionsSchema = z.object({
+  provider: z.string().description('Role LLM provider override.'),
+  model: z.string().description('Role model override.'),
   maxTokens: z
     .number()
     .step(1)
     .min(1)
     .max(Number.MAX_SAFE_INTEGER)
-    .description('Optional role output-token cap.'),
+    .description('Role output-token cap override.'),
+})
+
+/** One role in a crew. */
+export const CrewRoleSchema = z.object({
+  name: z.string().required().description('Stable role name (planner/orchestrator/builder/verifier).'),
+  presetId: z.string().required().description('Agent preset this role is composed under.'),
+  // Prevent Schemastery from materializing an omitted agentOptions as `{}`
+  // (same guard the shipped `tool-subagent` row uses for its own field).
+  agentOptions: RoleAgentOptionsSchema.default(undefined as unknown as { provider: string; model: string; maxTokens: number })
+    .description('Per-role model-route override (provider/model/maxTokens); wins over the plugin settings field by field.'),
+  provider: z.string().description('Per-role model-provider override (legacy alias of agentOptions.provider).'),
+  model: z.string().description('Per-role model override (legacy alias of agentOptions.model).'),
+  maxTokens: z
+    .number()
+    .step(1)
+    .min(1)
+    .max(Number.MAX_SAFE_INTEGER)
+    .description('Per-role output-token cap (legacy alias of agentOptions.maxTokens).'),
   toolFilter: z
     .object({
       allow: z.array(z.string()).description('Global tool names the role keeps; everything else is removed.'),
       deny: z.array(z.string()).description('Global tool names removed from the role.'),
     })
-    .description('Optional role tool scoping (allow and/or deny). Required capability is always advertised.'),
+    // Preserve omission. Schemastery otherwise MATERIALIZES an absent nested
+    // object as `{ allow: [], deny: [] }`, and an empty allowlist means
+    // `tools.restrict()` removes every tool — the child then fails loud with
+    // "allows no tool known to this deployment" (or silently loses its whole
+    // tool set on planes where the restrict is clipped). A role that names no
+    // filter must mean "no scoping", not "deny everything".
+    .default(undefined as unknown as { allow: string[]; deny: string[] })
+    .description('Optional role tool scoping (allow and/or deny). Omitted = no scoping; the required capability is always advertised.'),
   roleTask: z.string().required().description('Task statement delivered on every turn.'),
   description: z.string().description('Human-facing role description.'),
   tasks: z.array(TaskSchema).default([]).description('Structured task list for this role; gate checks the verifier against these.'),
@@ -78,22 +101,28 @@ export const CrewSchema = z.object({
 
 export const CrewsSchema = z.dict(CrewSchema).default({}).description('Named crews of role-bound workers.')
 
-/** The plugin's composition-time `Config` (same shape as the settings schema). */
+/**
+ * The plugin's composition-time `Config` (same shape as the settings schema).
+ *
+ * `provider`/`model`/`maxTokens` are the DEFAULT child route. A request-level
+ * `agentOptions` — on a `tool-subagent` row, on a direct `ctx.subagents.start()`
+ * call, or on a crew role — overrides them field by field (see `src/route.ts`).
+ */
 export const Config = z.object({
   providerName: z.string().default('preset').description('Registry name on ctx.subagents.'),
   presetId: z.string().description('Agent preset every non-crew child is composed under.'),
-  provider: z.string().default('deepseek-official').description('Default child LLM provider.'),
-  model: z.string().default('deepseek-v4-flash').description('Default child model id.'),
+  provider: z.string().default('deepseek-official').description('Default child LLM provider (a request-level agentOptions override wins).'),
+  model: z.string().default('deepseek-v4-flash').description('Default child model id (a request-level agentOptions override wins).'),
   maxTokens: z
     .number()
     .step(1)
     .min(1)
     .max(Number.MAX_SAFE_INTEGER)
-    .description('Optional default output-token cap.'),
+    .description('Optional default output-token cap (a request-level agentOptions override wins).'),
   maxDepth: z
     .union([z.natural().max(Number.MAX_SAFE_INTEGER), z.const('provider-managed')])
     .default(3)
-    .description("Delegation depth cap, or 'provider-managed'."),
+    .description("Delegation depth cap, or 'provider-managed'. The effective cap is the tighter of this and the request's."),
   crews: CrewsSchema,
 })
 

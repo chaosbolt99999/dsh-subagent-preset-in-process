@@ -20,6 +20,7 @@ import {
   type SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import { attachStructuredRuntime, type StructuredHandle } from './structured.js'
+import { effectiveMaxDepth, resolveRoute } from './route.js'
 import type { Config } from './config.js'
 
 // Load the cordis context augmentations the setup callback relies on
@@ -166,7 +167,9 @@ export class PresetInProcessProvider implements SubagentProvider {
 
     const config = this.readConfig()
     const parent = request.parent
-    const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : request.maxDepth
+    // Depth: the tighter of the caller's cap and the plugin's setting, so a
+    // row-level `maxDepth` and the deployment's setting each keep their effect.
+    const maxDepth = effectiveMaxDepth(request.maxDepth, config.maxDepth)
     const childDepth = resolveChildDepth(parent, maxDepth)
     const childId = SessionId(randomUUID())
     const boundary = 0
@@ -176,12 +179,11 @@ export class PresetInProcessProvider implements SubagentProvider {
     // asking for the provider's base composition. Unset fields fall back to the
     // configured preset/filter.
     const presetId = request.presetId ?? config.presetId
-    const forcedAgentOptions = {
-      ...request.agentOptions,
-      provider: config.provider,
-      model: config.model,
-      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-    }
+    // Per-request ROUTE wins field by field over the plugin's resolved settings
+    // (see `resolveRoute`): an `agentOptions` override on the delegating
+    // `tool-subagent` row, or on a direct `ctx.subagents.start()` call, is the
+    // finer-grained control knob over Settings → Plugins.
+    const forcedAgentOptions = resolveRoute(request.agentOptions, config)
     const meta = {
       ...childSessionMeta(parent, childDepth, boundary),
       agentPreset: presetId,
@@ -223,11 +225,7 @@ export class PresetInProcessProvider implements SubagentProvider {
     const config = this.readConfig()
     return Promise.resolve({
       ...(config.presetId !== undefined ? { presetId: config.presetId } : {}),
-      agentOptions: {
-        provider: config.provider,
-        model: config.model,
-        ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-      },
+      agentOptions: resolveRoute(undefined, config),
     })
   }
 }

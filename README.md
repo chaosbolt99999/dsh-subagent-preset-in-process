@@ -2,10 +2,33 @@
 
 A DSH subagent backend that pins **every child agent** to a named **agent
 preset** and routes every child through the plugin's resolved **settings**
-(provider/model, editable live in Settings → Plugins). It is a Cordis function
-plugin that registers a `SubagentProvider` on `ctx.subagents`, so the shipped
-`tool-subagent` (or any custom tool) can delegate children that always run under
-one composition regardless of the parent's preset.
+(provider/model, editable live in Settings → Plugins) — with a request-level
+`agentOptions` override on any delegating tool row or crew role. It is a Cordis
+function plugin that registers a `SubagentProvider` on `ctx.subagents`, so the
+shipped `tool-subagent` (or any custom tool) can delegate children that always
+run under one composition regardless of the parent's preset. It also ships a
+named-**crew** service (`ctx.crews`) — role-bound, continuously resident workers
+with routed or deterministic-pipeline handoff — and a Settings → Plugins card.
+
+## Install
+
+```jsonc
+// ~/.dsh/profiles/<profile>/package.json
+{
+  "dependencies": {
+    "dsh-subagent-preset-in-process": "link:/path/to/dsh-subagent-preset-in-process"
+  },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "dsh-subagent-preset-in-process"] } }
+}
+```
+
+The package carries its own bundle patch (`cordis.patch.yml`), so adding it to
+`dsh.profile.bundles` mounts the provider, the `subagent_preset` delegation tool
+and the bundled `subagent-slim` preset. `dist/` and `lib/client.js` are committed
+(and are what `main`/`exports` point at); rebuild them from source with
+`npm install && npm run build`. Any preset a crew role pins must be mountable
+from the profile that runs the delegation — a preset row importing a package
+that is not a dependency of that profile fails at mount time, not at boot.
 
 ## Why
 
@@ -24,20 +47,57 @@ Settings → Plugins edit applies to the next child with no restart. The current
 deployment routes every child through `merge/deepseek/deepseek-v4-flash-0731`
 (merge gateway, dsv4f) over a `zai/glm-5.3-flash` parent.
 
-Route precedence:
+Route precedence (highest first):
 
-1. **Request-level override** — `agentOptions` on a `tool-subagent` row or a
-   crew role (`provider`/`model`/`maxTokens`). Absent by default; this is the
-   future finer-grained control knob.
-2. **Plugin settings** — `provider`/`model` as resolved at start time.
+1. **Request-level override** — `agentOptions` on the delegating `tool-subagent`
+   row, on a crew role, or on a direct `ctx.subagents.start()` call
+   (`provider`/`model`/`maxTokens`). Absent by default, so everything follows
+   Settings; set it and only the fields you name are pinned.
+2. **Plugin settings** — `provider`/`model`/`maxTokens` as resolved at start
+   time.
 3. **Parent inheritance** — any field still unresolved falls back to the
    parent's route via `resolveChildAgentOptions`.
 
-Mechanics: one-shot runs force the route inside `start()`; continuable runs are
+Every path that builds a child route goes through one resolver
+(`src/route.ts`), so the precedence cannot drift between them — the one-shot
+path used to write the settings route *over* the request's, silently discarding
+a row-level override (fixed; see "Route override" below).
+
+Mechanics: one-shot runs resolve the route inside `start()`; continuable runs are
 routed through the detached `ContinuableCreateSpec.agentOptions` returned by
 `prepareContinuable()` (threaded by the shared-runtime patch — see
-`SHARED-PATCH.md`), and the manager records the EFFECTIVE route in the durable
-descriptor so cold resume reuses exactly what was used.
+`SHARED-PATCH.md`), with the manager merging the request's own options OVER it,
+and the EFFECTIVE route recorded in the durable descriptor so cold resume reuses
+exactly what was used.
+
+### Route override — the finer-grained knob
+
+```yaml
+# 1. per tool row: every child of THIS tool overrides Settings field by field
+- id: tool-subagent-cheap
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: preset
+    toolName: subagent_cheap
+    agentOptions:
+      model: gpt-5.6-luna        # provider still follows Settings
+
+# 2. per crew role: only the verifier is pinned, everyone else follows Settings
+crews:
+  engineering:
+    roles:
+      - name: verifier
+        presetId: subagent-slim
+        roleTask: Verify the builder's result.
+        agentOptions: { model: gpt-5.6-sol, maxTokens: 32000 }
+```
+
+Both shapes generalize per field: `agentOptions: { model: x }` pins only the
+model. The legacy flat role fields (`provider`/`model`/`maxTokens`) remain as
+per-field aliases; when both are present the nested `agentOptions` value wins.
+`crew_status` reports each role's EFFECTIVE route (override over live settings),
+so an override is verifiable without decoding session logs; the child's durable
+`subagent/descriptor` records what it actually ran on.
 
 ## Behavior
 
@@ -68,16 +128,17 @@ and `inheritsParentContext = false`. `prepareContinuable` is present, so
 |---|---|---|
 | `providerName` | `preset` | Registry name on `ctx.subagents`. |
 | `presetId` | *(optional)* | Default agent preset for non-crew children, and fallback composition. |
-| `provider` | `deepseek-official` | Child LLM provider — Settings → Plugins overrides live. |
-| `model` | `deepseek-v4-flash` | Child model id — Settings → Plugins overrides live. |
-| `maxTokens` | *(none)* | Optional default output-token cap. |
-| `maxDepth` | `3` | Numeric delegation cap, or `'provider-managed'`. |
+| `provider` | `deepseek-official` | Default child LLM provider — Settings → Plugins overrides live, and a request-level override wins over both. |
+| `model` | `deepseek-v4-flash` | Default child model id — same precedence. |
+| `maxTokens` | *(none)* | Optional default output-token cap — same precedence. |
+| `maxDepth` | `3` | Delegation cap, or `'provider-managed'`. The EFFECTIVE cap is the tighter of this and the request's (a tool row always sends its own, default 3), so neither knob is silently discarded. |
 | `crews` | `{}` | Named crews (see below). |
 
 Role fields (inside `crews.<crew>.roles[]`): `name`, `presetId`, `roleTask`
-(required); `provider`/`model`/`maxTokens` (optional route overrides);
-**`toolFilter`** (`allow`/`deny`, see the isolation warning below); `tasks`
-(structured task list); `description`.
+(required); **`agentOptions`** (`provider`/`model`/`maxTokens` — the per-role
+route override, see "Route override"); the legacy flat `provider`/`model`/
+`maxTokens` (per-field aliases of it); **`toolFilter`** (`allow`/`deny`, see the
+isolation warning below); `tasks` (structured task list); `description`.
 
 Each crew entry:
 
@@ -209,7 +270,7 @@ crews feature in live testing and is why every role — and the
 ### Live-testing fixes (2026-08-27)
 
 Four bugs found by live headless crew testing (full diagnosis in
-`../AGENTS.md` §10, commit `725e98c`):
+`IMPLEMENTATION-NOTES.md` §10, commit `725e98c`):
 
 1. **Crew members were never tool-isolated** (above) — per-role `toolFilter`
    added and threaded through `materialize()`; recorded in the durable
@@ -225,6 +286,48 @@ Four bugs found by live headless crew testing (full diagnosis in
    (resident members keep their composition).
 
 Unit tests: **31/31** (`crew.spec 8` + `provider.spec 13` + `pipeline.spec 10`).
+
+### Route-override round (2026-09-14)
+
+The documented request-level override ("`agentOptions` on a `tool-subagent` row
+or a crew role") was **not actually finished**, and its absence hid three bugs:
+
+1. **A one-shot request-level override was silently discarded.** `start()` spread
+   `request.agentOptions` and then wrote `config.provider`/`config.model` over
+   it, so a row that pinned a model still ran on the settings model — the
+   documented precedence (#1) was inverted for one-shot children (the
+   continuable path was correct, so the same row behaved differently depending
+   on whether the call ran in the foreground or as a background child). Fixed by
+   one shared resolver (`src/route.ts`) used by every path.
+2. **A request-level `maxDepth` was discarded whenever the config named a
+   number** (`config.maxDepth ?? request.maxDepth`); the plugin's own setting had
+   the same problem in reverse for crew members. Now the effective cap is the
+   tighter of the two, so neither can silently override or widen the other.
+3. **Crew roles had no `agentOptions` shape at all** — only flat
+   `provider`/`model`/`maxTokens`. Roles now accept the canonical
+   `agentOptions` object (flat fields kept as per-field aliases, nested wins),
+   and `crew_status` reports the effective route per role and per live member,
+   so a pin is verifiable without decoding session logs.
+4. **A role that declared no `toolFilter` was denied every tool** (found live by
+   the new end-to-end script, not by any unit test). Schemastery *materializes*
+   an absent nested object: `CrewRoleSchema.toolFilter` resolved to
+   `{ allow: [], deny: [] }`, and an empty allowlist makes `tools.restrict()`
+   strip the child's whole tool set — the pinned child failed with
+   `"the filter was authored for a different plane"`. The field now carries the
+   same "preserve omission" guard the shipped `tool-subagent` row uses, so
+   omitted **is** unscoped. Every deployment so far had declared a filter on
+   every role, which is exactly why the missing-work round surfaced it.
+
+Unit tests: **67/67** (`route.spec 17` + `crew.spec 17` + `provider.spec 23` +
+`pipeline.spec 10`).
+
+**Live end-to-end proof** (`scripts/verify-route-override.sh`, added this round)
+— boots a real headless DSH with a `--patch` overlay adding (a) a second
+`tool-subagent` row whose `agentOptions.model` differs from Settings and (b) a
+two-role crew where only one role pins a model, then decodes the per-frame zstd
+session logs and asserts the EFFECTIVE route of each child: the row child ran on
+the override (not the Settings model) with the untouched Settings provider, the
+pinned crew role ran on the override, and the un-pinned role stayed on Settings.
 
 ### Crew tools
 
@@ -246,7 +349,9 @@ The plugin registers these model-facing tools over `ctx.crews`:
   `list_agents` polling: it wakes the moment the role reports done.
 - `subagent_wait(subagent_id)` — the same indefinite wait for any continuable
   child by id.
-- `crew_status()` — list crews, roles, orchestrator, `mode`, pipeline `order`/`verifyGate`/cursor and `tasks`.
+- `crew_status()` — list crews, roles, orchestrator, `mode`, the **effective
+  per-role routes** (`routes`) and live `members` with the route each was
+  materialized on, plus pipeline `order`/`verifyGate`/cursor and `tasks`.
 
 ### Continuable preset pinning + routing
 
@@ -292,6 +397,7 @@ host libs (`pnpm run build:lib:host`) after applying, then restart DSH.
     provider: preset
     toolName: subagent_preset
     backgroundMode: continuable
+    # agentOptions: { model: deepseek/deepseek-v4-flash-0731 }   # per-row override
 ```
 
 The provider row is **host-plane** (registered once, like `spawn`/`fork`); the
@@ -353,15 +459,18 @@ logged: each child's `meta.agentPreset` is the durable composition record, and
 the descriptor is appended in the child's first turn; each crew handoff is a
 `followup` turn with a `coordinator` message source.
 
-**Verification** — `tsc --noEmit` clean; 31/31 unit tests pass (Config defaults +
-crew parsing incl. per-role toolFilter, capability advertisement,
-`inheritsParentContext`, registry name, `prepareContinuable` spec = pinned
-presetId + settings-derived route incl. live route changes and maxTokens
-passthrough, pre-publication abort, per-request `presetId` override in `start()`,
-crew role/orchestrator resolution, self-handoff and unknown-crew rejection,
-`reloadCrews` live-settings tests, plus 10 pipeline/task/verify-gate tests for
-order, next/prev, task status, verify pass/fail, retry/block and handoff
-enforcement). The harness subagent workspaces pass 543/543 with the
+**Verification** — `tsc --noEmit` clean; 64/64 unit tests pass (Config defaults +
+crew parsing incl. per-role toolFilter and per-role `agentOptions`, capability
+advertisement, `inheritsParentContext`, registry name, `prepareContinuable` spec
+= pinned presetId + settings-derived route incl. live route changes and
+maxTokens passthrough, pre-publication abort, per-request `presetId` override in
+`start()`, **request-level route precedence: field-by-field override over the
+settings route for one-shot `start()` and for crew materialization, legacy flat
+role aliases, maxTokens inheritance when no source caps it, depth-cap
+tightening**, crew role/orchestrator resolution, self-handoff and unknown-crew
+rejection, `reloadCrews` live-settings tests, plus 10 pipeline/task/verify-gate
+tests for order, next/prev, task status, verify pass/fail, retry/block and
+handoff enforcement). The harness subagent workspaces pass 1051/1051 with the
 shared-runtime patch applied.
 
 **Run-from-source web smoke (2026-08-26)** — DSH booted from a source checkout
@@ -391,4 +500,4 @@ per-frame-decoded log: header `agentPreset: subagent-slim` + `delegationDepth:
 1`, descriptor route `merge/deepseek-v4-flash-0731` (plus the role's
 `toolFilter.allow`), and role-scoped tool lists (planner/orchestrator 14,
 builder 12, verifier 13, one-shot 9). The pre-fix run of the same test showed
-the 36-tool leak that motivated the `toolFilter` work (AGENTS.md §10.1).
+the 36-tool leak that motivated the `toolFilter` work (IMPLEMENTATION-NOTES.md §10.1).

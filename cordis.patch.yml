@@ -51,6 +51,10 @@
                 presetId: subagent-slim
                 toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
                 roleTask: Verify the builder's result against the task and report.
+                # Per-role route override (request > settings > parent). Omit it
+                # and this role follows Settings → Plugins like every other
+                # child; set it and only the named fields are pinned:
+                # agentOptions: { model: deepseek/deepseek-v4-flash-0731, maxTokens: 32000 }
           # Pipeline crew (deterministic order + verify-gate + structured tasks)
           engineering-pipeline:
             mode: pipeline
@@ -88,6 +92,12 @@
         backgroundMode: continuable
         toolFilter:
           allow: [bash, read, write, edit, glob, grep, read_image, crew_wait, todo_write]
-        # No static agentOptions: the route comes from the provider's detached
-        # spec (live resolved settings), merged under any caller request. Add a
-        # per-tool override here later for finer-grained control.
+        # Route precedence: REQUEST > SETTINGS > PARENT.
+        #   * no `agentOptions` here  → every child follows Settings → Plugins
+        #     (the provider's detached spec from `prepareContinuable()`).
+        #   * `agentOptions` here     → overrides Settings field by field for
+        #     every child of THIS tool; unset fields still follow Settings.
+        # This is the per-tool-row override knob. Example (uncomment to pin this
+        # tool's children to a cheaper model while settings keep the default):
+        # agentOptions:
+        #   model: deepseek/deepseek-v4-flash-0731

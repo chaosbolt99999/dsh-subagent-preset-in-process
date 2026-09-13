@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-preset-in-process",
-  "description": "In-process subagent backend that pins every child to a named agent preset and a fixed model (deepseek-v4-flash) on ctx.subagents",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness subagent backend that pins every child to a named agent preset, routes every child through live plugin settings, and lets a tool row or a crew role override that route field by field. Ships a named-crew service (ctx.crews) with pipeline + verify-gate orchestration and a Settings card.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,8 +21,20 @@
     "lib/client.js",
     "lib/client.d.ts",
     "cordis.patch.yml",
-    "agent-presets/**/*"
+    "agent-presets/**/*",
+    "scripts/**/*",
+    "SHARED-PATCH.md",
+    "IMPLEMENTATION-NOTES.md",
+    "README.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "build": "tsc && node scripts/build-client.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify:override": "bash scripts/verify-route-override.sh",
+    "verify:route": "bash scripts/verify-headless-different-model.sh"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -38,7 +50,34 @@
       "immediately": true
     }
   },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "subagent",
+    "agent-preset",
+    "subagent-provider",
+    "crews",
+    "orchestration"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chaosbolt99999/dsh-subagent-preset-in-process.git"
+  },
+  "homepage": "https://github.com/chaosbolt99999/dsh-subagent-preset-in-process#readme",
+  "bugs": {
+    "url": "https://github.com/chaosbolt99999/dsh-subagent-preset-in-process/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.7"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.7",

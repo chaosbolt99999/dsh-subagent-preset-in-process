@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Config as PluginConfig, Task } from './config.js'
+import { resolveRoute, roleRouteOverrides, type RouteOverrides } from './route.js'
 
 /**
  * Crew orchestration: a named set of role-bound, continuously-resident child
@@ -31,9 +32,18 @@ export interface CrewRole {
   readonly name: string
   /** The agent preset this role is composed under (required). */
   readonly presetId: string
-  /** Optional model-route override; falls back to the plugin defaults. */
+  /**
+   * Per-role model-route override (the request-level knob): `provider`/`model`/
+   * `maxTokens` win over the plugin settings field by field when this role is
+   * materialized. Absent by default, so a role with no override follows
+   * Settings → Plugins like every other child.
+   */
+  readonly agentOptions?: RouteOverrides
+  /** Legacy flat alias of `agentOptions.provider` (per-field fallback). */
   readonly provider?: string
+  /** Legacy flat alias of `agentOptions.model` (per-field fallback). */
   readonly model?: string
+  /** Legacy flat alias of `agentOptions.maxTokens` (per-field fallback). */
   readonly maxTokens?: number
   /**
    * Optional role tool scoping, applied as the child's scoped `tools.restrict()`.
@@ -83,11 +93,14 @@ export interface CrewHandoff {
   readonly messageId: MessageId
 }
 
-interface MemberState {
+/** One materialized crew member (role -> live continuable child). */
+export interface MemberState {
   readonly crew: string
   readonly role: string
   readonly childId: SessionId
   readonly presetId: string
+  /** The EFFECTIVE route this member was materialized on (durable in its descriptor). */
+  readonly route: RouteOverrides
 }
 
 interface PipelineState {
@@ -175,6 +188,31 @@ export class CrewService extends Service {
 
   crew(crew: string): Crew {
     return this.requireCrew(crew)
+  }
+
+  /**
+   * The EFFECTIVE model route a role gets on its NEXT materialize: the role's
+   * request-level override (`agentOptions`, else its legacy flat aliases) over
+   * the plugin's live resolved settings, field by field. Exposed through
+   * `crew_status` so a per-role override can be verified without decoding
+   * session logs.
+   */
+  roleRoute(crew: string, role: string): RouteOverrides {
+    const c = this.requireCrew(crew)
+    const def = c.roles.find((r) => r.name === role)
+    if (def === undefined) throw new Error(`crew "${crew}" has no role "${role}"`)
+    return resolveRoute(roleRouteOverrides(def), this.readConfig())
+  }
+
+  /** Live members of a crew, in declaration order (only materialized roles). */
+  liveMembers(crew: string): readonly MemberState[] {
+    const c = this.requireCrew(crew)
+    const out: MemberState[] = []
+    for (const role of c.roles) {
+      const m = this.members.get(crew)?.get(role.name)
+      if (m !== undefined) out.push(m)
+    }
+    return out
   }
 
   /** Resolved pipeline order for a crew (explicit order or declaration order). */
@@ -285,16 +323,16 @@ export class CrewService extends Service {
       // `request.presetId` (the shared subagent runtime mounts it instead of
       // inheriting the parent's preset). Per-role `def.presetId` wins; the
       // provider-level fallback covers roles that name none.
+      //
+      // Route: the role's request-level override (agentOptions, or its legacy
+      // flat aliases) wins field by field over the plugin's resolved settings —
+      // exactly the precedence the one-shot path applies — so a role that pins
+      // nothing follows Settings → Plugins.
+      const route = this.roleRoute(crew, role)
       const request: any = {
         prompt: rolePrompt(def, crew, role),
         parent,
-        agentOptions: {
-          provider: def.provider ?? config.provider,
-          model: def.model ?? config.model,
-          ...(def.maxTokens !== undefined || config.maxTokens !== undefined
-            ? { maxTokens: def.maxTokens ?? config.maxTokens }
-            : {}),
-        },
+        agentOptions: route,
         presetId: def.presetId ?? config.presetId,
       // Role tool scoping (see CrewRole.toolFilter): without it a host-plane
       // deployment hands every role the parent's full global tool set. Passed
@@ -310,7 +348,7 @@ export class CrewService extends Service {
         request,
         signal,
       })
-      const member: MemberState = { crew, role, childId: res.childId, presetId: def.presetId }
+      const member: MemberState = { crew, role, childId: res.childId, presetId: def.presetId, route }
       this.members.get(crew)!.set(role, member)
       out.push(member)
     }
@@ -541,6 +579,7 @@ function toCrew(name: string, entry: CrewConfigEntry): Crew {
     roles: (entry.roles as any[]).map((r) => ({
       name: r.name,
       presetId: r.presetId,
+      agentOptions: r.agentOptions,
       provider: r.provider,
       model: r.model,
       maxTokens: r.maxTokens,
