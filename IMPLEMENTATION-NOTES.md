@@ -413,6 +413,18 @@ filtering), not a global tool, and `tools.restrict()` fails loud on unknown
 names (`crew_materialize` rejected every role until `report` was removed from
 `cordis.patch.yml` AND `~/.dsh/settings.yaml` — both surfaces must agree).
 
+**Pitfall (2026-09-14):** an allowlist that omits a tool the pinned preset
+DOES register removes it from the child's catalog silently — no error, no log.
+`find_symbol` was omitted from this row's list for weeks while a downstream
+plugin reported "the row registers but the tool never arrives"; the tool was
+never missing, it was masked. The give-away that the filter, not the registry,
+was at fault: every allow/deny list OUTSIDE this file named it, and the tool
+was absent only on the paths whose list did not. Because a filter is a global
+mask, an allowlist is a complete statement of the child's capability surface —
+treat adding a tool row to a pinned preset as incomplete until every delegating
+list names it. `scripts/render-composition.mjs` prints the composed list
+without booting, which is the check that would have ended this in minutes.
+
 **Verified (2026-08-27 22:52 run):** planner/orchestrator 14 tools, builder 12
 (no `get_goal`/`crew_task_update`), verifier 13 (`crew_verify` present); all
 headers `agentPreset: subagent-slim`, `delegationDepth: 1`, route

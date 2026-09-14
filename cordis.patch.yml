@@ -31,25 +31,35 @@
           # host-plane deployments (CLI/headless): there the preset join is additive, so
           # without a filter every role silently sees the parent's full global tool set.
           # On the web plane the same names are no-ops (the preset owns those tools).
+          #
+          # EVERY list below names `find_symbol`, and so must any list added here.
+          # A filter is a GLOBAL-tool mask: an omitted name is removed from the
+          # child's view even though the pinned preset registers it and its
+          # order-115 section tells the child to use it. Omitting it on
+          # 2026-09-14 produced the "registered but never delivered" report —
+          # the row applied, `register()` returned, the tool stayed invisible —
+          # while every allow-list OUTSIDE this file already named it, which is
+          # why this layer went unexamined for so long. Inspect the composed
+          # filter with scripts/render-composition.mjs, no boot required.
           engineering:
             mode: routed
             orchestratorRole: orchestrator
             roles:
               - name: planner
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
                 roleTask: Break the goal into ordered tasks and hand them to the orchestrator.
               - name: orchestrator
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, get_goal, todo_write] }
                 roleTask: Route each task to the right role and track completion.
               - name: builder
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
                 roleTask: Implement the assigned task and report the result.
               - name: verifier
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
                 roleTask: Verify the builder's result against the task and report.
                 # Per-role route override (request > settings > parent). Omit it
                 # and this role follows Settings → Plugins like every other
@@ -61,16 +71,16 @@
             roles:
               - name: planner
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_handoff, crew_status, crew_task_update, crew_wait, todo_write] }
                 roleTask: Break the goal into tasks; hand T1 to builder.
                 tasks: [{ id: T1, title: Implement the requested change, acceptanceCriteria: Change implemented and reported, status: pending }]
               - name: builder
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_status, crew_handoff, crew_wait, todo_write] }
                 roleTask: Implement the task (evidence = what you changed); hand to verifier.
               - name: verifier
                 presetId: subagent-slim
-                toolFilter: { allow: [bash, read, write, edit, glob, grep, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
+                toolFilter: { allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_status, crew_verify, crew_handoff, crew_wait, todo_write] }
                 roleTask: Verify T1 against acceptanceCriteria; call crew_verify with pass/fail.
             pipeline: { order: [planner, builder, verifier], verifyGate: { enabled: true, verifierRole: verifier, maxRetries: 3 } }
           # A second pipeline crew can be declared the same way; switching
@@ -84,6 +94,15 @@
     # deployments (the continuable path gets the same filter from
     # `prepareContinuable()`); the child-scope `report` tool is exempt from
     # filtering (own-layer registration).
+    #
+    # THIS list is the one that governs the `subagent_preset` path — the tool a
+    # coordinator actually calls — and it is the layer settings.yaml cannot
+    # reach: the plugin's settings namespace (`subagent-preset-in-process`)
+    # covers the provider/preset/route/crews, not this row. Until 2026-09-14 it
+    # omitted `find_symbol`, so every preset-pinned child lost the tool its own
+    # order-115 section told it to use, while the crew lists (Settings →
+    # Plugins) already had it — which is the whole reason the symptom looked
+    # like a harness bug. Keep it in step with the crew lists above.
     - id: tool-subagent-preset
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
@@ -91,7 +110,7 @@
         toolName: subagent_preset
         backgroundMode: continuable
         toolFilter:
-          allow: [bash, read, write, edit, glob, grep, read_image, crew_wait, todo_write]
+          allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_wait, todo_write]
         # Route precedence: REQUEST > SETTINGS > PARENT.
         #   * no `agentOptions` here  → every child follows Settings → Plugins
         #     (the provider's detached spec from `prepareContinuable()`).

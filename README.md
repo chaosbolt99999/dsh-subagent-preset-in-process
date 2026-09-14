@@ -330,6 +330,49 @@ session logs and asserts the EFFECTIVE route of each child: the row child ran on
 the override (not the Settings model) with the untouched Settings provider, the
 pinned crew role ran on the override, and the un-pinned role stayed on Settings.
 
+### The "registered but never delivered" tool (2026-09-14)
+
+A preset-pinned child (`subagent_preset`) could not see a tool its own pinned
+preset registers. The downstream plugin reported it as a harness/plugin defect,
+because the row applied, `apply()` ran, `register()` returned, and the preset's
+prompt section told the child to use the tool — while a sibling tool registered
+by the *same* `apply()` arrived normally.
+
+**The cause was this package's own bundle patch.** The `tool-subagent-preset`
+row's `toolFilter.allow` in `cordis.patch.yml` listed
+`bash, read, write, edit, glob, grep, read_image, crew_wait, todo_write` and did
+not list `find_symbol`. A filter is a **global-tool mask**: `ToolRuntime.view()`
+admits an inherited name only when every layer on the child's chain admits it, so
+an omitted name is removed from the child's catalog even though the preset
+registered it two layers away. `grep` and `glob` arrived because they were on the
+list; the named tool did not because it was not. Renaming the tool could not help
+either — the list names `find_symbol`, so a renamed registration is still
+unnamed by it.
+
+Why the layer went unexamined: **every allow/deny list outside this file already
+named it.** `settings.yaml`'s crew lists name it, the agent presets name it, and
+the plugin's settings namespace (`subagent-preset-in-process`) covers
+provider/preset/route/crews but **not** this tool row — so no Settings edit could
+surface it, and the row's config is composed from the bundle patch at boot.
+
+Two checks pin it, neither requiring a running process or a unit test:
+
+| check | how | result |
+| --- | --- | --- |
+| differential | same preset, plane and process; the crew role's allow-list names `find_symbol` and the `subagent_preset` row's does not | crew role: tool present and answering; `subagent_preset` child: absent |
+| static | `node scripts/render-composition.mjs web tool-subagent-preset` | prints the composed `allow` array — the omitted name is visible in it |
+
+The fix adds `find_symbol` to that list and to all four crew lists in the patch;
+the lists in the patch are now the deployment default for a fresh install, while
+`settings.yaml` continues to override the crews. A bundle patch is composed at
+boot, so the change needs a restart to take effect.
+
+Worth stating plainly for the next reader: the harness-side cross-plane fixes
+(`restrictableNames()` + the scoped vantage in `sanitizePresetChildToolFilter`)
+are what make a filter that names tools a plane does not register *clip* instead
+of failing the delegation loudly. They were necessary for the over-broad lists
+here — and they were never the reason a correctly-registered tool was invisible.
+
 ### Crew tools
 
 The plugin registers these model-facing tools over `ctx.crews`:
