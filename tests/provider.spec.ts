@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'vitest'
 import { Config } from '../src/config.js'
-import { PresetInProcessProvider } from '../src/provider.js'
+import { PresetInProcessProvider, childMeta } from '../src/provider.js'
 
 const cfg = {
   providerName: 'preset',
@@ -289,5 +289,34 @@ describe('PresetInProcessProvider.start request-level route override', () => {
     const p = new PresetInProcessProvider('preset', () => ({ ...cfg, maxDepth: 5 }) as never)
     const { parent } = captureCreate()
     assert.throws(() => p.start({ ...request({ maxDepth: 0 }), parent } as never), /exceeds maxDepth/)
+  })
+})
+
+describe('child creation metadata across harness generations', () => {
+  /**
+   * The plugin compiles against its VENDORED @deepseek-ai copies and runs
+   * against whatever harness serves it, and the meta helper changed shape across
+   * that seam: the vendored copy takes `lineageSeedLength` (number) and emits
+   * `seedLength`; current harnesses take `isSeeded` (boolean) and their session
+   * header REJECTS `seedLength` outright. This pins the normalization that keeps
+   * both ends honest.
+   */
+  const parent = {
+    id: 'parent-1',
+    session: { header: { id: 'parent-1', cwd: '/tmp' } },
+    ctx: { get: () => undefined },
+  } as never
+
+  it('emits a boolean isSeeded and never a seedLength', () => {
+    const meta = childMeta(parent, 1, false)
+    assert.equal(meta.isSeeded, false)
+    assert.equal('seedLength' in meta, false)
+    assert.equal(meta.origin, 'subagent')
+    assert.equal(meta.delegationDepth, 1)
+    assert.equal(meta.parentSession, 'parent-1')
+  })
+
+  it('reports a seeded child as isSeeded: true', () => {
+    assert.equal(childMeta(parent, 2, true).isSeeded, true)
   })
 })

@@ -26,6 +26,34 @@ function prePublicationAbort() {
     return new Error('subagent request was aborted before child publication');
 }
 /**
+ * Build one child's creation metadata, across harness generations.
+ *
+ * This package compiles against its VENDORED `@deepseek-ai` copies while it RUNS
+ * against whatever harness serves it, and the meta helper changed shape exactly
+ * across that seam: the vendored copy takes `lineageSeedLength` (a number) and
+ * emits `seedLength`, while current harnesses take `isSeeded` (a boolean) — and
+ * a current session header REJECTS `seedLength` outright with "has invalid field
+ * seedLength", then requires `isSeeded` to be a boolean. Passing the vendored
+ * shape through therefore failed at the first delegated child with "session
+ * header isSeeded must be a boolean", a type error the vendored `.d.ts` could
+ * not catch because there it is a number.
+ *
+ * So the harness helper still supplies the generation-specific fields (cwd,
+ * agentPreset, parentSession, origin, delegationDepth), and this normalizes the
+ * ONE field that moved: the boolean fact replaces the length, and the length is
+ * removed rather than left for a newer validator to reject.
+ * @param parent - the delegating parent.
+ * @param childDepth - the child's delegation depth.
+ * @param isSeeded - whether the child session is seeded with a parent prefix.
+ * @returns metadata accepted by the live session implementation.
+ */
+export function childMeta(parent, childDepth, isSeeded) {
+    const produced = childSessionMeta(parent, childDepth, (isSeeded ? 1 : 0));
+    delete produced.seedLength;
+    produced.isSeeded = isSeeded;
+    return produced;
+}
+/**
  * Append one one-shot descriptor inside the child's initial turn before its
  * first request. Mirrors the shared driver's `attachDescriptorAppend`.
  */
@@ -142,7 +170,7 @@ export class PresetInProcessProvider {
         // finer-grained control knob over Settings → Plugins.
         const forcedAgentOptions = resolveRoute(request.agentOptions, config);
         const meta = {
-            ...childSessionMeta(parent, childDepth, boundary),
+            ...childMeta(parent, childDepth, false),
             agentPreset: presetId,
         };
         let structured;
