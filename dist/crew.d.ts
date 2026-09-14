@@ -5,6 +5,37 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Config as PluginConfig, Task } from './config.js';
 import { type RouteOverrides } from './route.js';
+/** Options accepted by whichever message-delivery seam the harness exposes. */
+interface TurnDeliveryOptions {
+    source: {
+        kind: string;
+        form: string;
+        senderSessionId: SessionId;
+    };
+    signal: AbortSignal;
+}
+/**
+ * Deliver one turn to a continuable child, across harness generations.
+ *
+ * The seam was RENAMED, not reshaped: older harnesses expose
+ * `subagents.followup(parent, childId, content, options)`, current ones expose
+ * `subagents.sendMessage(sender, targetId, content, options)` with the same
+ * arguments and return value. A plugin that calls either name directly throws
+ * "is not a function" on the other generation, so both are accepted and the
+ * modern name wins.
+ *
+ * `source` is passed unconditionally: the older seam consumes it to record who
+ * relayed the turn, and the newer one derives authorship itself and ignores the
+ * extra key.
+ * @param ctx - a context carrying the `subagents` service.
+ * @param sender - the delegating parent agent.
+ * @param targetId - the continuable child's session id.
+ * @param content - the message content blocks.
+ * @param options - relay source and caller cancellation.
+ * @returns the accepted message id.
+ * @throws when the harness exposes neither delivery method.
+ */
+export declare function deliverTurn(ctx: Context, sender: Agent, targetId: SessionId, content: ContentBlock[], options: TurnDeliveryOptions): Promise<MessageId>;
 /**
  * Crew orchestration: a named set of role-bound, continuously-resident child
  * agents (planner <-> orchestrator <-> builder <-> verifier) that hand work to
@@ -26,7 +57,6 @@ import { type RouteOverrides } from './route.js';
  */
 /** One role's durable definition. */
 export interface CrewRole {
-    /** The role's stable name (planner/orchestrator/builder/verifier). */
     readonly name: string;
     /** The agent preset this role is composed under (required). */
     readonly presetId: string;
@@ -229,3 +259,4 @@ declare module '@deepseek-ai/cordis' {
         crews: CrewService;
     }
 }
+export {};

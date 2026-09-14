@@ -421,6 +421,31 @@ cold resume, and the one-shot path. `src/provider.ts` no longer imports any
 harness symbol that is not part of the released package, so the plugin builds and
 runs against an unpatched checkout.
 
+### Generation drift: three shims, and why they exist
+
+This package compiles against its vendored `@deepseek-ai` copies while it RUNS
+against whatever harness serves it. Every seam that moved between those two
+generations fails at runtime while type-checking cleanly against the stale
+`.d.ts`, so each one was found by a live failure rather than by `tsc`:
+
+| seam | vendored copy | current harness | shim |
+| --- | --- | --- | --- |
+| settings registration | free `installSettingsSection()` + `settingsNamespace()` | `settings.installSection(owner, ns, schema, entry, hooks)` | `installSettings()` prefers the method, dynamic-imports the old helper, reports if neither exists |
+| child session meta | `childSessionMeta(parent, depth, lineageSeedLength: number)` emitting `seedLength` | `childSessionMeta(parent, depth, isSeeded: boolean)`; the header REJECTS `seedLength` | `childMeta()` normalizes the one moved field |
+| turn delivery | `subagents.followup(parent, childId, content, options)` | `subagents.sendMessage(sender, targetId, content, options)` | `deliverTurn()` accepts both, modern name first |
+
+All three are covered by unit tests, and every other helper the plugin imports
+was signature-diffed against the current harness (`applyChildComposition`,
+`captureDelegatedPolicyOverrides`, `appendDelegatedPolicyOverrides`,
+`resolveChildDepth`, `resolveChildAgentOptions`, `assertSubagentMaxDepth`,
+`finalAssistantOutput`, `foldConsumedWork`, `createUserMessage`,
+`validateJsonSchemaValue` — all identical).
+
+The durable fix is to refresh the vendored copies so the compile-time types match
+the generation that runs; until then, treat a missing runtime symbol as the
+expected failure mode of a harness update, and prefer an explicit shim over a
+direct call so both generations keep working.
+
 ### Crew tools
 
 The plugin registers these model-facing tools over `ctx.crews`:
