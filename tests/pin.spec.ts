@@ -66,7 +66,8 @@ function fakeCtx(services: Record<string, unknown>) {
 
 /** A child agent as the listeners see it: id, ctx, and a session event log. */
 function fakeAgent(id: string, ctx: unknown, events: { type: string; data?: unknown }[] = []) {
-  return { id, ctx, session: { events } } as never
+  // The current session API exposes the log through `snapshotEvents(from)`.
+  return { id, ctx, session: { snapshotEvents: (from = 0) => events.slice(from) } } as never
 }
 
 const deps = (overrides: Partial<{ presetId: string; crews: Record<string, unknown> }> = {}) => ({

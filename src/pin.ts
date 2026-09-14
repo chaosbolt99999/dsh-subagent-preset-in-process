@@ -151,7 +151,15 @@ export function resolvePin(agent: Agent, deps: PinDeps): Pin | undefined {
   const id = String(agent.id)
   const recorded = PINS.get(id)
   if (recorded !== undefined) return recorded
-  const events = agent.session?.events
+  // Read the log through the CURRENT accessor. `session.events` no longer
+  // exists; reading it returned `undefined`, which made this fallback silently
+  // resolve nothing — a crew member kept the parent's full tool surface with no
+  // error anywhere, which is the worst possible failure for an isolation
+  // feature. The cast covers the stale vendored `.d.ts`.
+  const session = agent.session as unknown as {
+    snapshotEvents: (from?: number) => readonly { type: string; data?: unknown }[]
+  }
+  const events = session?.snapshotEvents?.(0)
   if (events === undefined) return undefined
   return pinFromDescriptor(events, deps)
 }
