@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { foldConsumedWork, type AgentSetup, type CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   appendDelegatedPolicyOverrides,
   assertSubagentMaxDepth,
@@ -155,7 +155,13 @@ function readResult(
   cancelled: boolean,
   structured: StructuredHandle | undefined,
 ): SubagentResult {
-  const own = child.session.events.slice(boundary)
+  // The session's event log is read through `snapshotEvents(fromIndex)` on the
+  // current harness; the older `session.events` array this package's vendored
+  // types declare no longer exists (reading it yielded
+  // "Cannot read properties of undefined (reading 'slice')").
+  const own = (child.session as unknown as {
+    snapshotEvents: (from: number) => readonly SessionEvent[]
+  }).snapshotEvents(boundary)
   const lastEnd = foldConsumedWork(own).end
   const output = finalAssistantOutput(own) ?? []
   const recorded = toStopReason(lastEnd?.data.reason)
@@ -243,12 +249,18 @@ export class PresetInProcessProvider implements SubagentProvider {
           // pinned preset, and the filter is applied last, against the child's
           // real post-re-link view. That keeps the whole capability inside the
           // package, so it runs against an unpatched harness.
+          // The EFFECTIVE filter: a row that still carries one wins, otherwise
+          // the plugin's own `toolFilter` setting. Applied after the re-link, so
+          // it is validated against the composition the child ends up on — a row
+          // filter is validated by the harness at creation, against the PARENT's
+          // composition, which is what made "unknown global tool" possible.
+          const filter = request.toolFilter ?? config.toolFilter
           await composePinnedChild(
             childCtx,
             parent,
             {
               presetId,
-              ...request.toolFilter !== undefined ? { toolFilter: request.toolFilter } : {},
+              ...filter !== undefined ? { toolFilter: filter } : {},
             },
             request.persona,
           )

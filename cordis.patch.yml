@@ -25,6 +25,14 @@
         # child (one-shot, continuable, crew) follows the resolved settings.
         provider: merge
         model: deepseek/deepseek-v4-flash-0731
+        # The filter every pinned child gets, applied by the PLUGIN after the
+        # child is re-linked onto its preset — so it is validated against the
+        # composition the child ENDS UP on. A filter on the delegating tool row
+        # below would instead be validated by the harness at creation, against
+        # the parent's composition, where a plane-specific name fails the spawn
+        # with "tools.restrict() names unknown global tool".
+        toolFilter:
+          allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_wait, todo_write]
         crews:
           # Routed crew (model chooses next role; add mode: pipeline for deterministic chain).
           # `toolFilter.allow` pins each role to the slim preset's tool set — REQUIRED on
@@ -109,8 +117,8 @@
         provider: preset
         toolName: subagent_preset
         backgroundMode: continuable
-        toolFilter:
-          allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_wait, todo_write]
+        # NO toolFilter here on purpose: see the plugin config above. The
+        # plugin applies the effective filter after the re-link.
         # Route precedence: REQUEST > SETTINGS > PARENT.
         #   * no `agentOptions` here  → every child follows Settings → Plugins
         #     (the provider's detached spec from `prepareContinuable()`).

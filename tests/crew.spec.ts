@@ -153,13 +153,19 @@ describe('CrewService role route (request-level override)', () => {
     })
   })
 
-  it('forwards a declared role toolFilter unchanged', async () => {
+  it('keeps a role toolFilter OUT of the request so the harness cannot reject it', async () => {
+    // The harness applies a request filter at CREATION, validated against the
+    // parent's composition, where a plane-specific name fails the spawn with
+    // "tools.restrict() names unknown global tool". The pin listener applies the
+    // role's filter after the child is re-linked onto its pinned preset instead,
+    // resolving it from the crew config by the child's creation label.
     const captured: any[] = []
     const svc = new CrewService(mockCtxWithSubagents(captured), () =>
       crewWithRoles([{ name: 'builder', presetId: 'slim', roleTask: 'Build.', toolFilter: { allow: ['bash'] } }]),
     )
     await svc.materialize('engineering', {} as never, new AbortController().signal)
-    assert.deepEqual(captured[0].request.toolFilter, { allow: ['bash'], deny: [] })
+    assert.equal(captured[0].request.toolFilter, undefined)
+    assert.equal(captured[0].label, 'crew:engineering:builder', 'the label carries the pin for the listener')
   })
 
   it('lets a role agentOptions override win field by field', async () => {

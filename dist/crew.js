@@ -224,13 +224,12 @@ export class CrewService extends Service {
                 parent,
                 agentOptions: route,
                 presetId: def.presetId ?? config.presetId,
-                // Role tool scoping (see CrewRole.toolFilter): without it a host-plane
-                // deployment hands every role the parent's full global tool set. Passed
-                // through unclipped: the preset-pinned compose seam sanitizes the filter
-                // against the child's OWN view (global registry plus the mounted preset's
-                // registrations) at application time — the parent's global-only view is
-                // the wrong vantage point on planes whose tools are preset-mounted.
-                ...(def.toolFilter !== undefined ? { toolFilter: def.toolFilter } : {}),
+                // Role tool scoping (see CrewRole.toolFilter) is NOT passed through the
+                // request: the harness would apply it at creation, validated against the
+                // PARENT's composition, where a plane-specific name fails the spawn with
+                // "unknown global tool". The pin listener applies the role's filter
+                // instead, after the child is re-linked onto its pinned preset — the
+                // composition the filter was written for.
             };
             const res = await this.ctx.subagents.startContinuable({
                 provider,

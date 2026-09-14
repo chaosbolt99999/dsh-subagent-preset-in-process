@@ -13,7 +13,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are a focused worker subagent. Complete the assigned subtask and report.
 
 # ── tools ───────────────────────────────────────────────────────────────────
