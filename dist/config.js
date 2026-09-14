@@ -114,4 +114,14 @@ export const Config = z.object({
         .default(3)
         .description("Delegation depth cap, or 'provider-managed'. The effective cap is the tighter of this and the request's."),
     crews: CrewsSchema,
+    toolFilter: z
+        .object({
+        allow: z.array(z.string()).description('Global tool names every pinned child keeps; everything else is removed.'),
+        deny: z.array(z.string()).description('Global tool names removed from every pinned child.'),
+    })
+        // Same omission guard as the crew roles: Schemastery materializes an absent
+        // nested object as `{ allow: [], deny: [] }`, and an empty allowlist would
+        // strip the child's whole tool set.
+        .default(undefined)
+        .description('Optional filter applied to every child this provider pins. The PLUGIN applies it after the child is re-linked to its preset, so it is validated against the composition the child actually ends up on and never trips the harness fail-loud unknown-name validation. A filter on the delegating TOOL ROW is validated against the parent composition at creation, which is plane-dependent — move that list here to make the deployment independent of the harness.'),
 });

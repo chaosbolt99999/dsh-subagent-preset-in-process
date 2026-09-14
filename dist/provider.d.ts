@@ -1,4 +1,4 @@
-import { type ResolvedSubagentStartRequest, type SubagentProvider, type SubagentRun } from '@deepseek-ai/dsh-subagent';
+import { type ContinuableCreateRequest, type ResolvedSubagentStartRequest, type SubagentProvider, type SubagentRun } from '@deepseek-ai/dsh-subagent';
 import type { Config } from './config.js';
 /**
  * The preset-pinning in-process subagent provider. Mirrors the spawn provider
@@ -18,7 +18,7 @@ export declare class PresetInProcessProvider implements SubagentProvider {
     readonly inheritsParentContext = false;
     constructor(name: string, readConfig: () => Config);
     start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;
-    prepareContinuable(): Promise<{
+    prepareContinuable(request?: ContinuableCreateRequest): Promise<{
         agentOptions: import("./route.js").RouteOverrides;
         presetId?: string | undefined;
     }>;

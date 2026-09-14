@@ -373,6 +373,54 @@ are what make a filter that names tools a plane does not register *clip* instead
 of failing the delegation loudly. They were necessary for the over-broad lists
 here — and they were never the reason a correctly-registered tool was invisible.
 
+### Harness-independent preset pinning (2026-09-14)
+
+Pinning a child to a named preset used to be a **harness** capability. A
+provider's only lever over a continuable child's composition is data in
+`ContinuableCreateSpec`, and that spec carries `{ seed? }` — deliberately, since
+"the continuation manager owns the child's whole lifecycle after preparation".
+So the capability was carried as a local harness patch (a `presetId` field plus a
+mount path in the continuation manager), which meant this plugin could not run
+against an unpatched harness and could not be used together with a `git pull`.
+
+It is now entirely plugin-side (`src/pin.ts`), through two public seams:
+
+| seam | what it provides |
+| --- | --- |
+| `agentPresets.recompose(agentCtx, presetId)` | re-links a composed agent to another preset's standing mount **through the binding the roster itself kept**, so it works on a child that already joined its parent — the continuable child. It *re-links* rather than adds, so the pinned composition replaces the inherited one instead of piling on top of it |
+| `agent/session-start` + `agent/pre-step` | the child's `Agent` before its first turn, and an AWAITED waterfall, so the re-link completes before the request that assembles the child's catalog |
+
+The one-shot path composes with `applyChildComposition` — which is what carries
+the harness's own delegation-context statement and per-child persona, whose text
+is not re-exported, so calling the harness keeps this drift-free — and then
+re-links, before any turn runs.
+
+The **filter is applied by the plugin, after the re-link**, clipped to the names
+the child's final composition actually provides. Two reasons: a tool filter is
+validated against the viewing scope's names and fails loud on an unknown one, and
+the scope that matters is the one the child ENDS UP on. That also makes the new
+`toolFilter` plugin setting the recommended home for a delegating row's list: a
+filter on the tool row is validated against the *parent's* composition at
+creation, which is plane-dependent — the exact trap the `find_symbol` incident
+came from.
+
+**What is honestly lost** relative to the harness patch:
+
+1. **The durable header records the preset the harness composed at creation**
+   (the parent's), because the header is written before the re-link. Composition
+   and cold resume are unaffected — the listeners re-derive the pin from the
+   child's own `subagent/descriptor` (`provider`, plus the `crew:<crew>:<role>`
+   label) — but session listings and telemetry show the parent's preset.
+2. **A brief composition window** between creation and the re-link, in which the
+   child exists on the parent's composition. No turn runs in that window.
+3. The settings-driven route reaches a continuable child only through the row's
+   `agentOptions` (upstream behavior), not through the provider's detached spec.
+
+Everything else is preserved: crew members, per-role routes, per-role filters,
+cold resume, and the one-shot path. `src/provider.ts` no longer imports any
+harness symbol that is not part of the released package, so the plugin builds and
+runs against an unpatched checkout.
+
 ### Crew tools
 
 The plugin registers these model-facing tools over `ctx.crews`:

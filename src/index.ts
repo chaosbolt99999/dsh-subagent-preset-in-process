@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { Config, type Config as ConfigType } from './config.js'
 import { PresetInProcessProvider } from './provider.js'
+import { installPinning } from './pin.js'
 import { CrewService } from './crew.js'
 import { registerCrewTools } from './crew-tools.js'
 
@@ -35,6 +36,15 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   // `super(ctx, 'crews')` registers the service and auto-removes it on unload.
   const crews = new CrewService(ctx, () => current)
+
+  // Preset pinning for the CONTINUABLE path. The continuation manager owns a
+  // background child's creation, so the pinned preset cannot be chosen there by
+  // a provider; these listeners re-link the child onto it before its first
+  // request. Owned by `ctx.effect` so unload removes both listeners.
+  ctx.effect(() => installPinning(ctx, {
+    providerName: config.providerName,
+    readConfig: () => current,
+  }), 'subagent-preset-in-process.pinning')
 
   // Each `ctx.tools.register` is effect-scoped and auto-disposed on unload.
   registerCrewTools(ctx, crews)

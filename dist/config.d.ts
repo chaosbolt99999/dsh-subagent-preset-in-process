@@ -580,6 +580,13 @@ export declare const Config: z<Schemastery.ObjectS<{
             }>>;
         }>>;
     }>, string>>;
+    toolFilter: z<Schemastery.ObjectS<{
+        allow: z<string[], string[]>;
+        deny: z<string[], string[]>;
+    }>, Schemastery.ObjectT<{
+        allow: z<string[], string[]>;
+        deny: z<string[], string[]>;
+    }>>;
 }>, Schemastery.ObjectT<{
     providerName: z<string, string>;
     presetId: z<string, string>;
@@ -712,5 +719,12 @@ export declare const Config: z<Schemastery.ObjectS<{
             }>>;
         }>>;
     }>, string>>;
+    toolFilter: z<Schemastery.ObjectS<{
+        allow: z<string[], string[]>;
+        deny: z<string[], string[]>;
+    }>, Schemastery.ObjectT<{
+        allow: z<string[], string[]>;
+        deny: z<string[], string[]>;
+    }>>;
 }>>;
 export type Config = ReturnType<typeof Config>;

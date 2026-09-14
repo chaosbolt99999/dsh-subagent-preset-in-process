@@ -6,13 +6,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   appendDelegatedPolicyOverrides,
-  applyPresetChildComposition,
   assertSubagentMaxDepth,
   captureDelegatedPolicyOverrides,
   childSessionMeta,
   finalAssistantOutput,
   resolveChildAgentOptions,
   resolveChildDepth,
+  type ContinuableCreateRequest,
   type ResolvedSubagentStartRequest,
   type SubagentProvider,
   type SubagentResult,
@@ -20,6 +20,7 @@ import {
   type SubagentStopReason,
 } from '@deepseek-ai/dsh-subagent'
 import { attachStructuredRuntime, type StructuredHandle } from './structured.js'
+import { composePinnedChild, recordPin, type Pin } from './pin.js'
 import { effectiveMaxDepth, resolveRoute } from './route.js'
 import type { Config } from './config.js'
 
@@ -200,10 +201,21 @@ export class PresetInProcessProvider implements SubagentProvider {
         setup: async (childCtx: Context): Promise<void> => {
           const childSession = (childCtx.agent as Agent).session
           appendDelegatedPolicyOverrides(childSession, inherited)
-          await applyPresetChildComposition(childCtx, presetId, {
-            persona: request.persona,
-            toolFilter: request.toolFilter,
-          })
+          // The pinned composition is built by THIS plugin (`src/pin.ts`) rather
+          // than by a harness helper: `applyChildComposition` carries the
+          // delegation statement, `recompose()` then re-links the child onto the
+          // pinned preset, and the filter is applied last, against the child's
+          // real post-re-link view. That keeps the whole capability inside the
+          // package, so it runs against an unpatched harness.
+          await composePinnedChild(
+            childCtx,
+            parent,
+            {
+              presetId,
+              ...request.toolFilter !== undefined ? { toolFilter: request.toolFilter } : {},
+            },
+            request.persona,
+          )
           if (request.outputSchema !== undefined) {
             structured = attachStructuredRuntime(childCtx, request.outputSchema)
           }
@@ -215,16 +227,37 @@ export class PresetInProcessProvider implements SubagentProvider {
       )
   }
 
-  prepareContinuable() {
+  prepareContinuable(request?: ContinuableCreateRequest) {
     // Continuable children follow the SAME live settings route as one-shot
     // runs: the detached spec carries the resolved config's provider/model
     // (plus maxTokens when set), and the continuation manager merges it UNDER
-    // any caller-supplied request overrides (role-level pins win). `presetId`
-    // mounts the pinned preset instead of inheriting the parent's composition;
-    // a role-level `request.presetId` (crews) still overrides this default.
+    // any caller-supplied request overrides (role-level pins win).
+    //
+    // The PIN is recorded here because this call is the one moment the provider
+    // is handed the child's reserved session id before the child exists — the
+    // continuation manager owns creation, so a plugin-side re-link
+    // (`src/pin.ts`, on `agent/session-start` / `agent/pre-step`) needs that id
+    // to know which child to pin. Returning `presetId` as well is harmless: a
+    // patched harness pins at creation and the re-link then finds the child
+    // already on its preset, while an unpatched harness ignores the field and
+    // the listener does the work.
     const config = this.readConfig()
+    // A deployment that names no preset pins nothing: the child keeps the
+    // harness's default composition (the parent join) and no pin is recorded,
+    // so the listeners have nothing to act on.
+    const sessionId = request?.sessionId
+    if (config.presetId !== undefined) {
+      const pin: Pin = {
+        presetId: config.presetId,
+        ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
+      }
+      // Older harness generations call this with no request; without a session
+      // id there is nothing to key the pin by, and the descriptor fallback in
+      // the listeners still covers the child.
+      if (sessionId !== undefined) recordPin(String(sessionId), pin)
+    }
     return Promise.resolve({
-      ...(config.presetId !== undefined ? { presetId: config.presetId } : {}),
+      ...config.presetId !== undefined ? { presetId: config.presetId } : {},
       agentOptions: resolveRoute(undefined, config),
     })
   }
