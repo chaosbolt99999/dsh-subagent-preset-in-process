@@ -6,70 +6,32 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Config as PluginConfig, Task } from './config.js'
 import { resolveRoute, roleRouteOverrides, type RouteOverrides } from './route.js'
 
-/** Options accepted by whichever message-delivery seam the harness exposes. */
-interface TurnDeliveryOptions {
-  source: { kind: string; form: string; senderSessionId: SessionId }
-  signal: AbortSignal
-}
-
 /**
- * Deliver one turn to a continuable child, across harness generations.
+ * Deliver one turn to a continuable child.
  *
- * The seam was RENAMED, not reshaped: older harnesses expose
- * `subagents.followup(parent, childId, content, options)`, current ones expose
- * `subagents.sendMessage(sender, targetId, content, options)` with the same
- * arguments and return value. A plugin that calls either name directly throws
- * "is not a function" on the other generation, so both are accepted and the
- * modern name wins.
- *
- * `source` is passed unconditionally: the older seam consumes it to record who
- * relayed the turn, and the newer one derives authorship itself and ignores the
- * extra key.
+ * `subagents.sendMessage(sender, targetId, content, options)` is the current
+ * seam and the only one this package targets. The cast is purely about this
+ * package's VENDORED `@deepseek-ai` copies being a generation behind (they
+ * declare the older `followup` name) — reach the real API rather than a shim.
  * @param ctx - a context carrying the `subagents` service.
  * @param sender - the delegating parent agent.
  * @param targetId - the continuable child's session id.
  * @param content - the message content blocks.
- * @param options - relay source and caller cancellation.
+ * @param options - caller cancellation.
  * @returns the accepted message id.
- * @throws when the harness exposes neither delivery method.
  */
 export async function deliverTurn(
   ctx: Context,
   sender: Agent,
   targetId: SessionId,
   content: ContentBlock[],
-  options: TurnDeliveryOptions,
+  options: { signal: AbortSignal },
 ): Promise<MessageId> {
   const subagents = ctx.subagents as unknown as {
-    sendMessage?: (sender: Agent, targetId: SessionId, content: ContentBlock[], options: TurnDeliveryOptions) => Promise<MessageId>
-    followup?: (parent: Agent, childId: SessionId, content: ContentBlock[], options: TurnDeliveryOptions) => Promise<MessageId>
+    sendMessage: (sender: Agent, targetId: SessionId, content: ContentBlock[], options: { signal: AbortSignal }) => Promise<MessageId>
   }
-  const deliver = subagents.sendMessage ?? subagents.followup
-  if (deliver === undefined) {
-    throw new Error('this harness exposes neither subagents.sendMessage() nor subagents.followup(); crew handoff cannot be delivered')
-  }
-  return await deliver.call(ctx.subagents, sender, targetId, content, options)
+  return await subagents.sendMessage(sender, targetId, content, options)
 }
-
-/**
- * Crew orchestration: a named set of role-bound, continuously-resident child
- * agents (planner <-> orchestrator <-> builder <-> verifier) that hand work to
- * each other by turns. Each role is a continuable subagent pinned to its own
- * preset (and optional model route); a "turn" is one inbox message, and a
- * member's turn is "done" when its Activation settles (stopReason +
- * final output). The plugin enforces role scoping and handoff validity while a
- * designated orchestrator role routes the work.
- *
- * Two routing modes:
- * - `routed` (default): the model/orchestrator chooses the next role; the
- *   plugin enforces only same-crew + no self-handoff.
- * - `pipeline`: an ordered role chain (e.g. planner → orchestrator → builder →
- *   verifier → planner) driven by the plugin. The pipeline only advances past
- *   the verifier when verification passes; a failing verification loops back to
- *   the prior role with the verifier's failure report. Each role may carry a
- *   structured task list (task id, status, acceptance criteria) that handoffs
- *   reference and the gate checks.
- */
 
 /** One role's durable definition. */
 export interface CrewRole {  /** The role's stable name (planner/orchestrator/builder/verifier). */
@@ -447,10 +409,7 @@ export class CrewService extends Service {
     const prefix: ContentBlock[] = [
       { type: 'text', text: `You are the "${toRole}" role of crew "${crew}". ${targetDef?.roleTask ?? ''}\n\nWork handed to you from "${fromRole}":` },
     ]
-    const messageId = await deliverTurn(this.ctx, parent, to.childId, [...prefix, ...task], {
-      source: { kind: 'coordinator', form: 'relay', senderSessionId: from.childId },
-      signal,
-    })
+    const messageId = await deliverTurn(this.ctx, parent, to.childId, [...prefix, ...task], { signal })
     return { crew, fromRole, toRole, childId: to.childId, messageId }
   }
 

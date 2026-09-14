@@ -1,29 +1,24 @@
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import { type CreateAgentOptions } from '@deepseek-ai/dsh-agent';
 import { type ContinuableCreateRequest, type ResolvedSubagentStartRequest, type SubagentProvider, type SubagentRun } from '@deepseek-ai/dsh-subagent';
 import type { Config } from './config.js';
+/** The creation-metadata type the agent service accepts. */
+type ChildCreationMeta = NonNullable<CreateAgentOptions['meta']>;
 /**
- * Build one child's creation metadata, across harness generations.
+ * Build one child's durable creation metadata.
  *
- * This package compiles against its VENDORED `@deepseek-ai` copies while it RUNS
- * against whatever harness serves it, and the meta helper changed shape exactly
- * across that seam: the vendored copy takes `lineageSeedLength` (a number) and
- * emits `seedLength`, while current harnesses take `isSeeded` (a boolean) — and
- * a current session header REJECTS `seedLength` outright with "has invalid field
- * seedLength", then requires `isSeeded` to be a boolean. Passing the vendored
- * shape through therefore failed at the first delegated child with "session
- * header isSeeded must be a boolean", a type error the vendored `.d.ts` could
- * not catch because there it is a number.
- *
- * So the harness helper still supplies the generation-specific fields (cwd,
- * agentPreset, parentSession, origin, delegationDepth), and this normalizes the
- * ONE field that moved: the boolean fact replaces the length, and the length is
- * removed rather than left for a newer validator to reject.
+ * Written out here rather than delegated to the harness's `childSessionMeta`:
+ * this package's VENDORED copy of that helper is a generation behind (it takes
+ * `lineageSeedLength` and emits `seedLength`, a field the current session header
+ * REJECTS outright), and this plugin targets the current harness only. Owning
+ * the object means its fields are exactly the ones the running session
+ * validates; the cast covers the stale field types in the vendored `.d.ts`.
  * @param parent - the delegating parent.
  * @param childDepth - the child's delegation depth.
  * @param isSeeded - whether the child session is seeded with a parent prefix.
  * @returns metadata accepted by the live session implementation.
  */
-export declare function childMeta(parent: Agent, childDepth: number, isSeeded: boolean): Record<string, unknown>;
+export declare function childMeta(parent: Agent, childDepth: number, isSeeded: boolean): ChildCreationMeta;
 /**
  * The preset-pinning in-process subagent provider. Mirrors the spawn provider
  * (`@deepseek-ai/dsh-subagent-spawn-in-process`) but, instead of joining the
@@ -47,3 +42,4 @@ export declare class PresetInProcessProvider implements SubagentProvider {
         presetId?: string | undefined;
     }>;
 }
+export {};

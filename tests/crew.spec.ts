@@ -267,46 +267,30 @@ describe('CrewService role route (request-level override)', () => {
   })
 })
 
-describe('turn delivery across harness generations', () => {
-  const options = {
-    source: { kind: 'coordinator', form: 'relay', senderSessionId: 'child-a' },
-    signal: new AbortController().signal,
-  }
+describe('turn delivery', () => {
+  const options = { signal: new AbortController().signal }
   const parent = { id: 'parent' } as never
   const target = 'child-b' as never
   const content = [{ type: 'text', text: 'hand off' }] as never
 
-  /** A ctx whose subagents service exposes exactly the given methods. */
+  /** A ctx whose subagents service records the calls it receives. */
   function ctxWith(methods: Record<string, unknown>) {
-    const calls: string[] = []
+    const calls: { method: string; args: unknown[] }[] = []
     const service: Record<string, unknown> = {}
     for (const [name, result] of Object.entries(methods)) {
       service[name] = (...args: unknown[]) => {
-        calls.push(name)
-        void args
+        calls.push({ method: name, args })
         return Promise.resolve(result)
       }
     }
     return { ctx: { subagents: service } as never, calls }
   }
 
-  it('prefers the modern sendMessage name', async () => {
-    const { ctx, calls } = ctxWith({ sendMessage: 'm1', followup: 'm2' })
+  it('delivers through subagents.sendMessage with the caller cancellation', async () => {
+    const { ctx, calls } = ctxWith({ sendMessage: 'm1' })
     assert.equal(await deliverTurn(ctx, parent, target, content, options), 'm1')
-    assert.deepEqual(calls, ['sendMessage'])
-  })
-
-  it('falls back to the older followup name', async () => {
-    const { ctx, calls } = ctxWith({ followup: 'm2' })
-    assert.equal(await deliverTurn(ctx, parent, target, content, options), 'm2')
-    assert.deepEqual(calls, ['followup'])
-  })
-
-  it('says which seam is missing instead of failing as "not a function"', async () => {
-    const { ctx } = ctxWith({})
-    await assert.rejects(
-      () => deliverTurn(ctx, parent, target, content, options),
-      /neither subagents\.sendMessage\(\) nor subagents\.followup\(\)/,
-    )
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0]?.method, 'sendMessage')
+    assert.deepEqual(calls[0]?.args, [parent, target, content, options])
   })
 })

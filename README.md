@@ -421,30 +421,33 @@ cold resume, and the one-shot path. `src/provider.ts` no longer imports any
 harness symbol that is not part of the released package, so the plugin builds and
 runs against an unpatched checkout.
 
-### Generation drift: three shims, and why they exist
+### Targets the current harness (the vendored copies are a generation behind)
 
-This package compiles against its vendored `@deepseek-ai` copies while it RUNS
-against whatever harness serves it. Every seam that moved between those two
-generations fails at runtime while type-checking cleanly against the stale
-`.d.ts`, so each one was found by a live failure rather than by `tsc`:
+This package compiles against its vendored `@deepseek-ai` copies (`0.1.0-rc.7`)
+and RUNS against the installed harness (`0.1.5-rc.x`). It supports the current
+harness only — no dual-generation shims — so each place where the two differ is
+one narrow cast or one owned object, never a branch:
 
-| seam | vendored copy | current harness | shim |
+| seam | vendored (stale) | running harness | how this package handles it |
 | --- | --- | --- | --- |
-| settings registration | free `installSettingsSection()` + `settingsNamespace()` | `settings.installSection(owner, ns, schema, entry, hooks)` | `installSettings()` prefers the method, dynamic-imports the old helper, reports if neither exists |
-| child session meta | `childSessionMeta(parent, depth, lineageSeedLength: number)` emitting `seedLength` | `childSessionMeta(parent, depth, isSeeded: boolean)`; the header REJECTS `seedLength` | `childMeta()` normalizes the one moved field |
-| turn delivery | `subagents.followup(parent, childId, content, options)` | `subagents.sendMessage(sender, targetId, content, options)` | `deliverTurn()` accepts both, modern name first |
+| settings section | free `installSettingsSection()` + `settingsNamespace()` | `settings.installSection(owner, ns, schema, entry, hooks)` | cast to the service method and call it |
+| child session meta | `childSessionMeta(parent, depth, lineageSeedLength)` emitting `seedLength` | takes `isSeeded: boolean`; the session header REJECTS `seedLength` | `childMeta()` builds the object itself |
+| turn delivery | `subagents.followup(parent, childId, …)` | `subagents.sendMessage(sender, targetId, …)` | cast and call `sendMessage` |
+| agent creation setup | `(agentCtx)` | `(agentCtx, agent)`; direct `ctx.agent` is guard-rejected | two-parameter `setup`, cast for the stale type |
 
-All three are covered by unit tests, and every other helper the plugin imports
-was signature-diffed against the current harness (`applyChildComposition`,
-`captureDelegatedPolicyOverrides`, `appendDelegatedPolicyOverrides`,
-`resolveChildDepth`, `resolveChildAgentOptions`, `assertSubagentMaxDepth`,
-`finalAssistantOutput`, `foldConsumedWork`, `createUserMessage`,
-`validateJsonSchemaValue` — all identical).
+The consequence worth knowing before a harness update: **all four of these fail
+at RUNTIME while type-checking cleanly against the stale `.d.ts`**, because the
+`.d.ts` describes the older API as if it were current. Every other helper the
+plugin imports was signature-diffed against the current harness
+(`applyChildComposition`, `captureDelegatedPolicyOverrides`,
+`appendDelegatedPolicyOverrides`, `resolveChildDepth`, `resolveChildAgentOptions`,
+`assertSubagentMaxDepth`, `finalAssistantOutput`, `foldConsumedWork`,
+`createUserMessage`, `validateJsonSchemaValue` — all identical), as were the
+service methods it calls.
 
 The durable fix is to refresh the vendored copies so the compile-time types match
 the generation that runs; until then, treat a missing runtime symbol as the
-expected failure mode of a harness update, and prefer an explicit shim over a
-direct call so both generations keep working.
+expected failure mode of a harness update.
 
 ### Crew tools
 

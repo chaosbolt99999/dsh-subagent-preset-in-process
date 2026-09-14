@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import { appendDelegatedPolicyOverrides, assertSubagentMaxDepth, captureDelegatedPolicyOverrides, childSessionMeta, finalAssistantOutput, resolveChildAgentOptions, resolveChildDepth, } from '@deepseek-ai/dsh-subagent';
+import { appendDelegatedPolicyOverrides, assertSubagentMaxDepth, captureDelegatedPolicyOverrides, finalAssistantOutput, resolveChildAgentOptions, resolveChildDepth, } from '@deepseek-ai/dsh-subagent';
 import { attachStructuredRuntime } from './structured.js';
 import { composePinnedChild, recordPin } from './pin.js';
 import { effectiveMaxDepth, resolveRoute } from './route.js';
@@ -26,32 +26,30 @@ function prePublicationAbort() {
     return new Error('subagent request was aborted before child publication');
 }
 /**
- * Build one child's creation metadata, across harness generations.
+ * Build one child's durable creation metadata.
  *
- * This package compiles against its VENDORED `@deepseek-ai` copies while it RUNS
- * against whatever harness serves it, and the meta helper changed shape exactly
- * across that seam: the vendored copy takes `lineageSeedLength` (a number) and
- * emits `seedLength`, while current harnesses take `isSeeded` (a boolean) — and
- * a current session header REJECTS `seedLength` outright with "has invalid field
- * seedLength", then requires `isSeeded` to be a boolean. Passing the vendored
- * shape through therefore failed at the first delegated child with "session
- * header isSeeded must be a boolean", a type error the vendored `.d.ts` could
- * not catch because there it is a number.
- *
- * So the harness helper still supplies the generation-specific fields (cwd,
- * agentPreset, parentSession, origin, delegationDepth), and this normalizes the
- * ONE field that moved: the boolean fact replaces the length, and the length is
- * removed rather than left for a newer validator to reject.
+ * Written out here rather than delegated to the harness's `childSessionMeta`:
+ * this package's VENDORED copy of that helper is a generation behind (it takes
+ * `lineageSeedLength` and emits `seedLength`, a field the current session header
+ * REJECTS outright), and this plugin targets the current harness only. Owning
+ * the object means its fields are exactly the ones the running session
+ * validates; the cast covers the stale field types in the vendored `.d.ts`.
  * @param parent - the delegating parent.
  * @param childDepth - the child's delegation depth.
  * @param isSeeded - whether the child session is seeded with a parent prefix.
  * @returns metadata accepted by the live session implementation.
  */
 export function childMeta(parent, childDepth, isSeeded) {
-    const produced = childSessionMeta(parent, childDepth, (isSeeded ? 1 : 0));
-    delete produced.seedLength;
-    produced.isSeeded = isSeeded;
-    return produced;
+    const header = parent.session.header;
+    const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx);
+    return {
+        ...header.cwd === undefined ? {} : { cwd: header.cwd },
+        ...agentPreset === undefined ? {} : { agentPreset },
+        parentSession: header.id,
+        isSeeded,
+        origin: 'subagent',
+        delegationDepth: childDepth,
+    };
 }
 /**
  * Append one one-shot descriptor inside the child's initial turn before its
@@ -180,17 +178,13 @@ export class PresetInProcessProvider {
             meta,
             agentOptions: resolveChildAgentOptions(parent, forcedAgentOptions, childDepth),
             signal: request.signal,
-            setup: async (childCtx, createdAgent) => {
-                // The setup contract gained a SECOND parameter (the agent) and direct
-                // `ctx.agent` access became guard-rejected in the same generation, so
-                // reading the property — which this package's vendored `AgentSetup`
-                // type (one parameter) invites — now fails with "cannot get property
-                // agent without inject". Prefer the parameter and keep the property
-                // read as the older generation's fallback.
-                const child = createdAgent ?? childCtx.agent;
-                if (child === undefined) {
-                    throw new Error('agent creation setup received neither an agent parameter nor ctx.agent');
-                }
+            // Cast because the VENDORED `AgentSetup` (one parameter) is a generation
+            // behind the running one, which passes the agent as a second argument.
+            setup: (async (childCtx, child) => {
+                // The agent arrives as the setup's SECOND parameter. Reading
+                // `childCtx.agent` instead — which this package's vendored `AgentSetup`
+                // type (one parameter) invites — is guard-rejected on the current
+                // harness ("cannot get property agent without inject").
                 const childSession = child.session;
                 appendDelegatedPolicyOverrides(childSession, inherited);
                 // The pinned composition is built by THIS plugin (`src/pin.ts`) rather
@@ -207,7 +201,7 @@ export class PresetInProcessProvider {
                     structured = attachStructuredRuntime(childCtx, request.outputSchema);
                 }
                 attachDescriptorAppend(childCtx, request.descriptor);
-            },
+            }),
         })
             .then((handle) => drivePublishedRun(handle, request.signal, request.prompt, childId, boundary, structured));
     }

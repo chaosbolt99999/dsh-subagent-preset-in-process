@@ -10,7 +10,7 @@ function mockContext() {
     provided,
     subagents: {
       startContinuable: async () => ({ childId: 'child-' + Math.random().toString(36).slice(2) }),
-      followup: async () => 'msg-' + Math.random().toString(36).slice(2),
+      sendMessage: async () => 'msg-' + Math.random().toString(36).slice(2),
     },
   } as never
 }

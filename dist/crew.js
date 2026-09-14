@@ -1,33 +1,22 @@
 import { Service } from '@deepseek-ai/cordis';
 import { resolveRoute, roleRouteOverrides } from './route.js';
 /**
- * Deliver one turn to a continuable child, across harness generations.
+ * Deliver one turn to a continuable child.
  *
- * The seam was RENAMED, not reshaped: older harnesses expose
- * `subagents.followup(parent, childId, content, options)`, current ones expose
- * `subagents.sendMessage(sender, targetId, content, options)` with the same
- * arguments and return value. A plugin that calls either name directly throws
- * "is not a function" on the other generation, so both are accepted and the
- * modern name wins.
- *
- * `source` is passed unconditionally: the older seam consumes it to record who
- * relayed the turn, and the newer one derives authorship itself and ignores the
- * extra key.
+ * `subagents.sendMessage(sender, targetId, content, options)` is the current
+ * seam and the only one this package targets. The cast is purely about this
+ * package's VENDORED `@deepseek-ai` copies being a generation behind (they
+ * declare the older `followup` name) — reach the real API rather than a shim.
  * @param ctx - a context carrying the `subagents` service.
  * @param sender - the delegating parent agent.
  * @param targetId - the continuable child's session id.
  * @param content - the message content blocks.
- * @param options - relay source and caller cancellation.
+ * @param options - caller cancellation.
  * @returns the accepted message id.
- * @throws when the harness exposes neither delivery method.
  */
 export async function deliverTurn(ctx, sender, targetId, content, options) {
     const subagents = ctx.subagents;
-    const deliver = subagents.sendMessage ?? subagents.followup;
-    if (deliver === undefined) {
-        throw new Error('this harness exposes neither subagents.sendMessage() nor subagents.followup(); crew handoff cannot be delivered');
-    }
-    return await deliver.call(ctx.subagents, sender, targetId, content, options);
+    return await subagents.sendMessage(sender, targetId, content, options);
 }
 /**
  * The crew service (`ctx.crews`). Manages role-bound continuable children per
@@ -294,10 +283,7 @@ export class CrewService extends Service {
         const prefix = [
             { type: 'text', text: `You are the "${toRole}" role of crew "${crew}". ${targetDef?.roleTask ?? ''}\n\nWork handed to you from "${fromRole}":` },
         ];
-        const messageId = await deliverTurn(this.ctx, parent, to.childId, [...prefix, ...task], {
-            source: { kind: 'coordinator', form: 'relay', senderSessionId: from.childId },
-            signal,
-        });
+        const messageId = await deliverTurn(this.ctx, parent, to.childId, [...prefix, ...task], { signal });
         return { crew, fromRole, toRole, childId: to.childId, messageId };
     }
     /**

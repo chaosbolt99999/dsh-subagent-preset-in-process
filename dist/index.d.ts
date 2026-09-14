@@ -17,21 +17,13 @@ interface SectionHooks<T> {
     onChange(): void;
 }
 /**
- * Wire one settings section, across harness generations.
+ * Wire this plugin's settings section.
  *
- * The harness MOVED this seam: earlier generations exported a free
- * `installSettingsSection()` plus a `settingsNamespace()` brand and had no such
- * method on the service; current generations expose
- * `settings.installSection(owner, ns, schema, entry, hooks)` and export neither
- * function. A plugin that statically imports either name therefore fails to LOAD
- * on the other generation — the whole profile refuses to boot with "does not
- * provide an export named …", which is exactly what this plugin did against
- * master (0.1.5) while it still imported the old helpers.
- *
- * So the service method is preferred, the old free helper is reached through a
- * DYNAMIC import (a missing name resolves to `undefined` there instead of
- * aborting the module), and neither being present is REPORTED rather than fatal:
- * a plugin without a settings card is still a working plugin.
+ * `settings.installSection(owner, ns, schema, entry, hooks)` is the current
+ * seam and the only one this package targets. The cast is purely about this
+ * package's VENDORED `@deepseek-ai/dsh-settings` being a generation behind (it
+ * exports a free `installSettingsSection()` and has no method on the service) —
+ * reach the real API rather than a shim.
  * @param ctx - the plugin's context.
  * @param ns - the namespace to own.
  * @param schema - the section schema.
