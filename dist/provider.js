@@ -180,8 +180,18 @@ export class PresetInProcessProvider {
             meta,
             agentOptions: resolveChildAgentOptions(parent, forcedAgentOptions, childDepth),
             signal: request.signal,
-            setup: async (childCtx) => {
-                const childSession = childCtx.agent.session;
+            setup: async (childCtx, createdAgent) => {
+                // The setup contract gained a SECOND parameter (the agent) and direct
+                // `ctx.agent` access became guard-rejected in the same generation, so
+                // reading the property — which this package's vendored `AgentSetup`
+                // type (one parameter) invites — now fails with "cannot get property
+                // agent without inject". Prefer the parameter and keep the property
+                // read as the older generation's fallback.
+                const child = createdAgent ?? childCtx.agent;
+                if (child === undefined) {
+                    throw new Error('agent creation setup received neither an agent parameter nor ctx.agent');
+                }
+                const childSession = child.session;
                 appendDelegatedPolicyOverrides(childSession, inherited);
                 // The pinned composition is built by THIS plugin (`src/pin.ts`) rather
                 // than by a harness helper: `applyChildComposition` carries the
