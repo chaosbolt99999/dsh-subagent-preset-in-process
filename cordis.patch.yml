@@ -95,36 +95,25 @@
           # engineering.mode to pipeline makes that crew deterministic too.
 
     # ── the model-facing delegation tool ───────────────────────────────────
-    # Additional `tool-subagent` instance (distinct id from the base `tool-subagent`
-    # row that stays on `spawn`). Lets the model delegate through the pinned
-    # backend via the `subagent_preset` tool. `toolFilter.allow` restates the slim
-    # preset's tool set so one-shot children are ALSO isolated on host-plane
-    # deployments (the continuable path gets the same filter from
-    # `prepareContinuable()`); the child-scope `report` tool is exempt from
-    # filtering (own-layer registration).
+    # NO LONGER MOUNTED AS A tool-subagent ROW.
     #
-    # THIS list is the one that governs the `subagent_preset` path — the tool a
-    # coordinator actually calls — and it is the layer settings.yaml cannot
-    # reach: the plugin's settings namespace (`subagent-preset-in-process`)
-    # covers the provider/preset/route/crews, not this row. Until 2026-09-14 it
-    # omitted `find_symbol`, so every preset-pinned child lost the tool its own
-    # order-115 section told it to use, while the crew lists (Settings →
-    # Plugins) already had it — which is the whole reason the symptom looked
-    # like a harness bug. Keep it in step with the crew lists above.
-    - id: tool-subagent-preset
-      name: '@deepseek-ai/dsh-tool-subagent'
-      config:
-        provider: preset
-        toolName: subagent_preset
-        backgroundMode: continuable
-        # NO toolFilter here on purpose: see the plugin config above. The
-        # plugin applies the effective filter after the re-link.
-        # Route precedence: REQUEST > SETTINGS > PARENT.
-        #   * no `agentOptions` here  → every child follows Settings → Plugins
-        #     (the provider's detached spec from `prepareContinuable()`).
-        #   * `agentOptions` here     → overrides Settings field by field for
-        #     every child of THIS tool; unset fields still follow Settings.
-        # This is the per-tool-row override knob. Example (uncomment to pin this
-        # tool's children to a cheaper model while settings keep the default):
-        # agentOptions:
-        #   model: deepseek/deepseek-v4-flash-0731
+    # The plugin registers `subagent_preset` itself, so the PRESET is a CALL
+    # ARGUMENT instead of a deployment setting. A `tool-subagent` row cannot
+    # express that: its schema exposes only description/prompt/run_in_background
+    # (plus the optional model-selection triple) and `SubagentStartRequest`
+    # carries no `presetId` on an unpatched harness, so a row can only ever pin
+    # the one preset its `provider` instance was registered with. Mounting both
+    # would also register the same tool name twice. The plugin instead registers
+    # one provider INSTANCE per configured preset and dispatches on the `preset`
+    # argument — see `presets:` above and src/preset-tool.ts.
+    #
+    # Keep every `toolFilter.allow` list in this file in step with the crew
+    # lists: a tool name missing from a filter is silently invisible to the
+    # child, which is the failure this file already paid for.
+    #
+    # - id: tool-subagent-preset
+    #   name: '@deepseek-ai/dsh-tool-subagent'
+    #   config:
+    #     provider: preset
+    #     toolName: subagent_preset
+    #     backgroundMode: continuable

@@ -28,14 +28,34 @@ export declare function childMeta(parent: Agent, childDepth: number, isSeeded: b
 export declare class PresetInProcessProvider implements SubagentProvider {
     readonly name: string;
     private readonly readConfig;
+    /** The named preset this instance composes, or undefined for the default. */
+    readonly presetName?: string | undefined;
     readonly capabilities: {
+        agentOptions: boolean;
         outputSchema: boolean;
         depthLimit: boolean;
         toolFilter: boolean;
         persona: boolean;
     };
     readonly inheritsParentContext = false;
-    constructor(name: string, readConfig: () => Config);
+    constructor(name: string, readConfig: () => Config, 
+    /** The named preset this instance composes, or undefined for the default. */
+    presetName?: string | undefined);
+    /**
+     * This instance's effective config: the named preset's fields win over the
+     * plugin's top-level ones, so one provider instance per preset is a complete,
+     * self-describing delegation target.
+     * @returns the resolved config view for this instance.
+     */
+    view(): Config & {
+        presetId: string;
+    };
+    /** The route this instance pins, before any request-level override. */
+    route(): {
+        provider?: string;
+        model?: string;
+        maxTokens?: number;
+    };
     start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;
     prepareContinuable(request?: ContinuableCreateRequest): Promise<{
         agentOptions: import("./route.js").RouteOverrides;

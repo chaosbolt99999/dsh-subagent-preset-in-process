@@ -1,17 +1,18 @@
 /**
- * Plugin-side preset pinning — compose a delegated child under a NAMED agent
- * preset using only public harness API.
+ * Plugin-side preset AND route pinning — compose a delegated child under a NAMED
+ * agent preset, on a NAMED model route, using only public harness API.
  *
- * WHY THIS EXISTS. Pinning a child to a named preset instead of joining its
- * parent's composition was previously a HARNESS capability: a provider's only
- * lever over a continuable child's composition was data in
+ * WHY THIS EXISTS. Pinning a child to a named preset and route instead of
+ * joining its parent's composition was previously a HARNESS capability: a
+ * provider's only lever over a continuable child's composition was data in
  * `ContinuableCreateSpec`, and that spec carries `{ seed? }` only — deliberately,
  * because "the continuation manager owns the child's whole lifecycle after
  * preparation". Reaching the composition therefore required a local harness
  * patch (a `presetId` field plus a mount path in the continuation manager),
  * which meant this plugin could not be used against an unpatched harness.
  *
- * The capability is reachable from a plugin after all, through two public seams:
+ * The capability is reachable from a plugin after all, through three public
+ * seams:
  *
  *  - `agentPresets.recompose(agentCtx, presetId)` re-links a composed agent to
  *    another preset's standing mount *through the binding the roster itself
@@ -19,9 +20,15 @@
  *    exactly the continuable child. It RE-LINKS rather than adds, so the pinned
  *    composition replaces the inherited one instead of piling on top of it (the
  *    additive-composition defect that makes a preset join non-isolating).
+ *  - `agent/request` is an awaited waterfall that REPLACES the frozen call
+ *    configuration, and it runs before `request/header` is logged. It is the
+ *    only supported per-step rewrite of provider/model/maxTokens, so it is where
+ *    a pinned ROUTE is enforced. `prepareContinuable()`'s returned
+ *    `agentOptions` is silently discarded by an unpatched harness, which is why
+ *    a continuable child otherwise inherits the PARENT's model.
  *  - `agent/session-start` fires "once before the first turn" with the child's
  *    `Agent` in hand, and `agent/pre-step` is an awaited waterfall, so the
- *    re-link can be guaranteed before the child's first request is assembled.
+ *    re-link can be attempted before the child's first request is assembled.
  *
  * THE FILTER IS APPLIED HERE, after the re-link, for two reasons. A tool filter
  * is a global-tool mask validated against the viewing scope's names, so a list
@@ -35,11 +42,20 @@
  *  - the child's durable header records the preset the harness composed at
  *    creation (the parent's), because the header is written before the re-link.
  *    Composition and resume are unaffected; the recorded label is.
- *  - between creation and the re-link the child exists on the parent's
- *    composition. No turn runs in that window.
+ *  - the child's `subagent/descriptor` likewise records the route the harness
+ *    resolved at creation (the parent's), because the provider's detached spec
+ *    is discarded on an unpatched harness. The pinned route is therefore
+ *    re-derived from this plugin's live config on every activation rather than
+ *    read back from the descriptor.
+ *  - the FIRST request of a continuable child is assembled before any hook this
+ *    plugin owns can run, so it may still use the parent's composition and
+ *    route; the pin lands before the next request and forces a new request
+ *    series. `warnLatePin` reports when that happened instead of allowing a
+ *    silent half-pinned child.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import { type RouteOverrides } from './route.js';
 import type { Config } from './config.js';
 /**
  * Structural tool filter. Spelled out locally rather than imported so this
@@ -50,10 +66,12 @@ export interface PinFilter {
     readonly allow?: readonly string[];
     readonly deny?: readonly string[];
 }
-/** One resolved pin: the preset a child is composed under, plus its filter. */
+/** One resolved pin: the preset a child is composed under, its filter, and its route. */
 export interface Pin {
     readonly presetId: string;
     readonly toolFilter?: PinFilter;
+    /** Model route forced on every request this child makes. */
+    readonly route: RouteOverrides;
 }
 /** Dependencies the resolver reads; injected so tests need no live harness. */
 export interface PinDeps {
@@ -61,6 +79,8 @@ export interface PinDeps {
     readonly providerName: string;
     /** Live resolved plugin config (settings layer over the composition base). */
     readonly readConfig: () => Pick<Config, 'presetId' | 'crews'>;
+    /** The route this provider pins: request-level override wins per field. */
+    readonly route: () => RouteOverrides;
     /** Optional diagnostics sink. */
     readonly warn?: (message: string) => void;
 }
@@ -70,16 +90,25 @@ export declare function recordPin(sessionId: string, pin: Pin): void;
 export declare function forgetPin(sessionId: string): void;
 /** Read a recorded pin without consuming it. */
 export declare function recordedPin(sessionId: string): Pin | undefined;
+/**
+ * The pin already applied to one live activation, for the `agent/request`
+ * listener that enforces the route. `undefined` for an agent this plugin did
+ * not pin, which keeps the waterfall inert for the root session and for every
+ * other provider's children.
+ * @param agent - the agent about to make a model call.
+ * @returns its applied pin, or undefined.
+ */
+export declare function appliedPin(agent: Agent): Pin | undefined;
 /** Test seam: forget every recorded pin. */
 export declare function clearPins(): void;
 /**
  * Resolve the pin for one live agent: the recorded pin first, the child's own
  * durable descriptor second, nothing at all when the child is not ours.
  * @param agent - the child agent.
- * @param deps - provider name and live config.
+ * @param depsList - one entry per provider instance this plugin registered.
  * @returns the pin, or `undefined` when unowned.
  */
-export declare function resolvePin(agent: Agent, deps: PinDeps): Pin | undefined;
+export declare function resolvePin(agent: Agent, depsList: readonly PinDeps[]): Pin | undefined;
 /**
  * Apply one child's tool filter, clipped to the names its scope can restrict.
  *
@@ -116,17 +145,27 @@ export declare function rePin(childCtx: Context, pin: Pin): Promise<void>;
  */
 export declare function composePinnedChild(childCtx: Context, parent: Agent, pin: Pin, persona: string | undefined): Promise<void>;
 /**
- * Install the pin-enforcement listeners.
+ * Install the pin-enforcement listeners for every provider instance this plugin
+ * registered.
  *
- * Two events, one guard. `agent/session-start` is the earliest point the child's
- * `Agent` exists ("once before the first turn") and handles the ordinary case
- * before anything reads the child's catalog; `agent/pre-step` is an AWAITED
- * waterfall, so it is the guarantee — the re-link has completed before the step
- * that assembles the request proceeds. A pin is applied once per agent; the
- * resolver returns nothing for agents this provider did not establish, so the
+ * Three listeners, one guard:
+ *  - `agent/session-start` is the earliest point the child's `Agent` exists
+ *    ("once before the first turn") and handles the ordinary case;
+ *  - `agent/pre-step` is an AWAITED waterfall, so it is the preset guarantee —
+ *    the re-link has completed before the step that assembles the next request
+ *    proceeds;
+ *  - `agent/request` is an AWAITED waterfall that replaces the call config, and
+ *    it is the ROUTE guarantee: it runs before `request/header` is logged, so
+ *    the pinned provider/model is both what the call uses and what the log
+ *    records. This is the only reason a continuable child follows the plugin's
+ *    route at all, since the provider's detached `agentOptions` is discarded by
+ *    an unpatched harness.
+ *
+ * A pin is applied once per live activation and re-applied on every new one; the
+ * resolver returns nothing for agents this plugin did not establish, so the
  * listeners are inert for the root session and for other providers' children.
  * @param ctx - the plugin's context (unscoped: it must observe every agent).
- * @param deps - provider name and live config.
- * @returns a disposer that removes both listeners.
+ * @param depsList - one entry per registered provider instance.
+ * @returns a disposer that removes every listener.
  */
-export declare function installPinning(ctx: Context, deps: PinDeps): () => void;
+export declare function installPinning(ctx: Context, depsList: readonly PinDeps[]): () => void;

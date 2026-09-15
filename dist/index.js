@@ -3,6 +3,7 @@ import { PresetInProcessProvider } from './provider.js';
 import { installPinning } from './pin.js';
 import { CrewService } from './crew.js';
 import { registerCrewTools } from './crew-tools.js';
+import { registerPresetTool } from './preset-tool.js';
 export const name = 'subagent-preset-in-process';
 export const inject = ['subagents', 'agents', 'tools'];
 /**
@@ -48,17 +49,61 @@ export function apply(ctx, config) {
     // Live resolved config: settings layer over the composition base. Children
     // read it at start time, so a settings change applies to the next child.
     let current = config;
-    ctx.subagents.registerProvider(new PresetInProcessProvider(config.providerName, () => ({ ...current, providerName: current.providerName ?? 'preset' })));
+    // One provider instance per preset. `ctx.subagents` is a REGISTRY and the
+    // provider NAME is the one thing a caller selects per delegation, so "pick the
+    // preset in the tool call" is expressed as "pick the provider". The default
+    // instance keeps `config.providerName` so existing rows and direct
+    // `ctx.subagents.start()` calls resolve exactly as before.
+    const baseName = config.providerName ?? 'preset';
+    const providerFor = (preset) => preset === undefined || preset === '' ? baseName : `${baseName}:${preset}`;
+    const defaultProvider = new PresetInProcessProvider(baseName, () => ({ ...current, providerName: current.providerName ?? 'preset' }));
+    ctx.subagents.registerProvider(defaultProvider);
+    const instances = new Map();
+    for (const preset of Object.keys(current.presets ?? {})) {
+        const instance = new PresetInProcessProvider(providerFor(preset), () => ({ ...current, providerName: current.providerName ?? 'preset' }), preset);
+        instances.set(preset, instance);
+        ctx.subagents.registerProvider(instance);
+    }
     // `super(ctx, 'crews')` registers the service and auto-removes it on unload.
     const crews = new CrewService(ctx, () => current);
-    // Preset pinning for the CONTINUABLE path. The continuation manager owns a
-    // background child's creation, so the pinned preset cannot be chosen there by
-    // a provider; these listeners re-link the child onto it before its first
-    // request. Owned by `ctx.effect` so unload removes both listeners.
-    ctx.effect(() => installPinning(ctx, {
-        providerName: config.providerName,
-        readConfig: () => current,
-    }), 'subagent-preset-in-process.pinning');
+    // Preset AND route pinning for the CONTINUABLE path. The continuation manager
+    // owns a background child's creation, so neither the pinned preset nor the
+    // pinned route can be chosen there by a provider: an unpatched harness keeps
+    // only `seed` from `ContinuableCreateSpec` and discards the rest. These
+    // listeners re-link the child onto its preset and replace its call
+    // configuration before the next request. One entry per provider instance, so
+    // a child's own descriptor identifies which instance owns it.
+    const pinDeps = [
+        {
+            providerName: baseName,
+            readConfig: () => ({ presetId: defaultProvider.view().presetId, crews: current.crews }),
+            route: () => defaultProvider.route(),
+        },
+        ...[...instances.entries()].map(([preset, instance]) => ({
+            providerName: providerFor(preset),
+            readConfig: () => ({ presetId: instance.view().presetId, crews: current.crews }),
+            route: () => instance.route(),
+        })),
+    ];
+    ctx.effect(() => installPinning(ctx, pinDeps), 'subagent-preset-in-process.pinning');
+    // The preset-selecting delegation tool. It owns the `preset` argument that the
+    // shipped `tool-subagent` consumer cannot express, and it is what makes a
+    // shared tool agent addressable from any depth without touching the
+    // adjacent-agent messaging authority.
+    if (current.presetTool?.enabled !== false) {
+        const choices = () => [
+            { providerName: baseName, presetId: defaultProvider.view().presetId },
+            ...[...instances.entries()].map(([preset, instance]) => ({
+                providerName: providerFor(preset),
+                presetId: instance.view().presetId,
+            })),
+        ];
+        ctx.effect(() => registerPresetTool(ctx, {
+            toolName: current.presetTool?.toolName ?? 'subagent_preset',
+            readConfig: () => current,
+            choices,
+        }), 'subagent-preset-in-process.preset-tool');
+    }
     // Each `ctx.tools.register` is effect-scoped and auto-disposed on unload.
     registerCrewTools(ctx, crews);
     // Settings namespace: editable in Settings → Plugins. `base` carries the

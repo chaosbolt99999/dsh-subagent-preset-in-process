@@ -70,12 +70,22 @@ function fakeAgent(id: string, ctx: unknown, events: { type: string; data?: unkn
   return { id, ctx, session: { snapshotEvents: (from = 0) => events.slice(from) } } as never
 }
 
-const deps = (overrides: Partial<{ presetId: string; crews: Record<string, unknown> }> = {}) => ({
+/** One provider instance's dependencies. `resolvePin`/`installPinning` take a LIST. */
+const deps = (
+  overrides: Partial<{
+    presetId: string
+    crews: Record<string, unknown>
+    route: { provider?: string; model?: string; maxTokens?: number }
+    warn: (message: string) => void
+  }> = {},
+) => ({
   providerName: 'preset',
   readConfig: () => ({
     presetId: overrides.presetId ?? 'subagent-worker',
     crews: (overrides.crews ?? {}) as never,
   }),
+  route: () => overrides.route ?? {},
+  ...overrides.warn !== undefined ? { warn: overrides.warn } : {},
 })
 
 beforeEach(() => {
@@ -85,7 +95,7 @@ beforeEach(() => {
 describe('pin resolution', () => {
   it('prefers a recorded pin, keyed by the child session id', () => {
     recordPin('session-1', { presetId: 'subagent-slim' })
-    const pin = resolvePin(fakeAgent('session-1', fakeCtx({})), deps())
+    const pin = resolvePin(fakeAgent('session-1', fakeCtx({})), [deps()])
     assert.equal(pin?.presetId, 'subagent-slim')
     assert.equal(recordedPin('session-1')?.presetId, 'subagent-slim')
     forgetPin('session-1')
@@ -97,7 +107,7 @@ describe('pin resolution', () => {
       { type: 'session/start' },
       { type: 'subagent/descriptor', data: { provider: 'preset', label: 'research the tree' } },
     ]
-    const pin = resolvePin(fakeAgent('session-2', fakeCtx({}), events), deps({ presetId: 'subagent-worker' }))
+    const pin = resolvePin(fakeAgent('session-2', fakeCtx({}), events), [deps({ presetId: 'subagent-worker' })])
     assert.equal(pin?.presetId, 'subagent-worker')
   })
 
@@ -106,25 +116,25 @@ describe('pin resolution', () => {
       type: 'subagent/descriptor',
       data: { provider: 'preset', label: 'crew:engineering:builder' },
     }]
-    const pin = resolvePin(fakeAgent('session-3', fakeCtx({}), events), deps({
+    const pin = resolvePin(fakeAgent('session-3', fakeCtx({}), events), [deps({
       presetId: 'subagent-worker',
       crews: {
         engineering: {
           roles: [{ name: 'builder', presetId: 'subagent-slim', toolFilter: { allow: ['bash', 'find_symbol'] } }],
         },
       },
-    }))
+    })])
     assert.equal(pin?.presetId, 'subagent-slim')
     assert.deepEqual(pin?.toolFilter, { allow: ['bash', 'find_symbol'] })
   })
 
   it('returns nothing for a child another provider established', () => {
     const events = [{ type: 'subagent/descriptor', data: { provider: 'spawn', label: 'other' } }]
-    assert.equal(resolvePin(fakeAgent('session-4', fakeCtx({}), events), deps()), undefined)
+    assert.equal(resolvePin(fakeAgent('session-4', fakeCtx({}), events), [deps()]), undefined)
   })
 
   it('returns nothing for an agent with no descriptor at all', () => {
-    assert.equal(resolvePin(fakeAgent('root', fakeCtx({})), deps()), undefined)
+    assert.equal(resolvePin(fakeAgent('root', fakeCtx({})), [deps()]), undefined)
   })
 })
 
@@ -216,13 +226,20 @@ describe('pin enforcement listeners', () => {
     }
   }
 
-  it('registers both listeners and removes them on dispose', () => {
+  it('registers every listener and removes them on dispose', () => {
     const { ctx, handlers } = listenerCtx()
-    const dispose = installPinning(ctx, deps())
-    assert.deepEqual([...handlers.keys()].sort(), ['agent/pre-step', 'agent/session-start'])
+    const dispose = installPinning(ctx, [deps()])
+    // `agent/request` is the ROUTE guarantee; without it a continuable child
+    // keeps its parent's model, because the provider's detached `agentOptions`
+    // never reaches an unpatched continuation manager.
+    assert.deepEqual(
+      [...handlers.keys()].sort(),
+      ['agent/pre-step', 'agent/request', 'agent/session-start'],
+    )
     dispose()
     assert.equal(handlers.get('agent/session-start')?.length, 0)
     assert.equal(handlers.get('agent/pre-step')?.length, 0)
+    assert.equal(handlers.get('agent/request')?.length, 0)
   })
 
   it('applies a recorded pin once, then leaves later steps alone', async () => {
@@ -236,7 +253,7 @@ describe('pin enforcement listeners', () => {
     ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
       name === 'agentPresets' ? presets : name === 'tools' ? tools : undefined
     recordPin('child-1', { presetId: 'subagent-worker', toolFilter: { allow: ['bash'] } })
-    installPinning(ctx, deps())
+    installPinning(ctx, [deps()])
     const step = handlers.get('agent/pre-step')![0]!
     const next = (async () => ({ kind: 'enter' })) as never
     await step({ agent: fakeAgent('child-1', childCtx) } as never, next)
@@ -250,7 +267,7 @@ describe('pin enforcement listeners', () => {
     const presets = fakePresets('cordis')
     ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
       name === 'agentPresets' ? presets : undefined
-    installPinning(ctx, deps())
+    installPinning(ctx, [deps()])
     const step = handlers.get('agent/pre-step')![0]!
     let proceeded = false
     const next = (async () => {
@@ -260,5 +277,100 @@ describe('pin enforcement listeners', () => {
     await step({ agent: fakeAgent('root-session', fakeCtx({ agentPresets: presets })) } as never, next)
     assert.deepEqual(presets.calls, [])
     assert.equal(proceeded, true, 'the waterfall always continues')
+  })
+
+  it('forces the pinned ROUTE through agent/request, keeping unrelated call fields', async () => {
+    const { ctx, handlers } = listenerCtx()
+    const presets = fakePresets('cordis')
+    ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
+      name === 'agentPresets' ? presets : undefined
+    // A continuable child's creation route is the PARENT's, because the
+    // provider's detached `agentOptions` never reaches an unpatched
+    // continuation manager — so the pin is the only thing that can move it.
+    recordPin('child-route', {
+      presetId: 'subagent-worker',
+      route: { provider: 'merge', model: 'zai/glm-5.3-flash' },
+    })
+    installPinning(ctx, [deps()])
+    // The SAME Agent object must be used for both listeners: the applied pin is
+    // keyed by the live activation, not by the session id.
+    const child = fakeAgent('child-route', fakeCtx({ agentPresets: presets }))
+    const next = (async () => ({ kind: 'enter' })) as never
+    await handlers.get('agent/pre-step')![0]!({ agent: child } as never, next)
+
+    const callConfig = async () => ({
+      provider: 'ccode',
+      model: 'deepseek/deepseek-v4.1-flash',
+      temperature: 0.2,
+      maxTokens: 4096,
+    })
+    const forced = await handlers.get('agent/request')![0]!({ agent: child } as never, callConfig)
+    assert.deepEqual(forced, {
+      provider: 'merge',
+      model: 'zai/glm-5.3-flash',
+      // Untouched: only the pinned fields are replaced.
+      temperature: 0.2,
+      maxTokens: 4096,
+    })
+  })
+
+  it('leaves an unpinned agent\'s call configuration exactly as it was', async () => {
+    const { ctx, handlers } = listenerCtx()
+    const presets = fakePresets('cordis')
+    ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
+      name === 'agentPresets' ? presets : undefined
+    installPinning(ctx, [deps()])
+    const callConfig = async () => ({ provider: 'ccode', model: 'deepseek/deepseek-v4.1-flash' })
+    const untouched = await handlers.get('agent/request')![0]!(
+      { agent: fakeAgent('root-session', fakeCtx({})) } as never,
+      callConfig,
+    )
+    assert.deepEqual(untouched, { provider: 'ccode', model: 'deepseek/deepseek-v4.1-flash' })
+  })
+
+  it('re-pins a NEW activation of the same session, which a cold resume creates', async () => {
+    const { ctx, handlers } = listenerCtx()
+    const presets = fakePresets('cordis')
+    const tools = fakeTools(['bash'])
+    ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
+      name === 'agentPresets' ? presets : name === 'tools' ? tools : undefined
+    recordPin('child-resumed', { presetId: 'subagent-worker', toolFilter: { allow: ['bash'] } })
+    installPinning(ctx, [deps()])
+    const step = handlers.get('agent/pre-step')![0]!
+    const next = (async () => ({ kind: 'enter' })) as never
+
+    // Run 1: the first activation.
+    await step({ agent: fakeAgent('child-resumed', fakeCtx({ agentPresets: presets, tools })) } as never, next)
+    assert.deepEqual(presets.calls, ['subagent-worker'])
+
+    // Run 2: the activation settled and a later wake COLD-RESUMED the child, so
+    // the harness built a fresh Agent for the SAME session id. A session-keyed
+    // "already pinned" set skipped this re-pin and silently left the resumed
+    // child on the recorded (parent) composition and route.
+    recordPin('child-resumed', { presetId: 'subagent-worker', toolFilter: { allow: ['bash'] } })
+    await step({ agent: fakeAgent('child-resumed', fakeCtx({ agentPresets: presets, tools })) } as never, next)
+    assert.deepEqual(presets.calls, ['subagent-worker', 'subagent-worker'])
+  })
+
+  it('reports a pin that landed after the child had already made a request', async () => {
+    const warnings: string[] = []
+    const { ctx, handlers } = listenerCtx()
+    const presets = fakePresets('cordis')
+    ;(ctx as { get: (name: string) => unknown }).get = (name: string) =>
+      name === 'agentPresets' ? presets : undefined
+    recordPin('child-late', { presetId: 'subagent-worker' })
+    installPinning(ctx, [deps({ warn: (m: string) => warnings.push(m) })])
+    // A child that already logged a request header was composed before any hook
+    // this plugin owns could run; that is the expected (and reported) case on an
+    // unpatched harness.
+    const late = {
+      id: 'child-late',
+      ctx: fakeCtx({ agentPresets: presets }),
+      session: { snapshotEvents: () => [], requestHeader: () => ({ config: {} }) },
+    } as never
+    const next = (async () => ({ kind: 'enter' })) as never
+    await handlers.get('agent/pre-step')![0]!({ agent: late } as never, next)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0]!, /made a request before it was pinned/)
   })
 })

@@ -137,22 +137,66 @@ function readResult(child, boundary, cancelled, structured) {
 export class PresetInProcessProvider {
     name;
     readConfig;
+    presetName;
     capabilities = {
+        // `agentOptions` IS honored (`resolveRoute` merges a caller's override over
+        // the plugin route field by field), and a `tool-subagent` row that names one
+        // is REJECTED by `assertCapabilities` unless it is advertised. Leaving it out
+        // made row-level route overrides silently unusable on the one-shot path; the
+        // continuable path never checked capabilities, which is why the omission
+        // went unnoticed there for so long.
+        agentOptions: true,
         outputSchema: true,
         depthLimit: true,
         toolFilter: true,
         persona: true,
     };
     inheritsParentContext = false;
-    constructor(name, readConfig) {
+    constructor(name, readConfig, 
+    /** The named preset this instance composes, or undefined for the default. */
+    presetName) {
         this.name = name;
         this.readConfig = readConfig;
+        this.presetName = presetName;
+    }
+    /**
+     * This instance's effective config: the named preset's fields win over the
+     * plugin's top-level ones, so one provider instance per preset is a complete,
+     * self-describing delegation target.
+     * @returns the resolved config view for this instance.
+     */
+    view() {
+        const config = this.readConfig();
+        const entry = this.presetName === undefined
+            ? undefined
+            : config.presets?.[this.presetName];
+        return {
+            ...config,
+            presetId: entry?.presetId ?? config.presetId,
+            provider: entry?.provider ?? config.provider,
+            model: entry?.model ?? config.model,
+            maxTokens: entry?.maxTokens ?? config.maxTokens,
+            toolFilter: entry?.toolFilter ?? config.toolFilter,
+            persona: entry?.persona ?? config.persona,
+        };
+    }
+    /** The route this instance pins, before any request-level override. */
+    route() {
+        const view = this.view();
+        const out = {};
+        if (view.provider !== undefined)
+            out.provider = view.provider;
+        if (view.model !== undefined)
+            out.model = view.model;
+        if (view.maxTokens !== undefined)
+            out.maxTokens = view.maxTokens;
+        return out;
     }
     start(request) {
         assertSubagentMaxDepth(request.maxDepth);
         if (request.signal.aborted)
             return Promise.reject(prePublicationAbort());
-        const config = this.readConfig();
+        const config = this.view();
         const parent = request.parent;
         // Depth: the tighter of the caller's cap and the plugin's setting, so a
         // row-level `maxDepth` and the deployment's setting each keep their effect.
@@ -206,7 +250,8 @@ export class PresetInProcessProvider {
                 await composePinnedChild(childCtx, parent, {
                     presetId,
                     ...filter !== undefined ? { toolFilter: filter } : {},
-                }, request.persona);
+                    route: forcedAgentOptions,
+                }, request.persona ?? config.persona);
                 if (request.outputSchema !== undefined) {
                     structured = attachStructuredRuntime(childCtx, request.outputSchema);
                 }
@@ -229,7 +274,7 @@ export class PresetInProcessProvider {
         // patched harness pins at creation and the re-link then finds the child
         // already on its preset, while an unpatched harness ignores the field and
         // the listener does the work.
-        const config = this.readConfig();
+        const config = this.view();
         // A deployment that names no preset pins nothing: the child keeps the
         // harness's default composition (the parent join) and no pin is recorded,
         // so the listeners have nothing to act on.
@@ -238,6 +283,11 @@ export class PresetInProcessProvider {
             const pin = {
                 presetId: config.presetId,
                 ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
+                // The ROUTE rides the same pin. On an unpatched harness the
+                // `agentOptions` returned below is DISCARDED, so this map — read by the
+                // `agent/request` listener — is the only thing that puts a continuable
+                // child on the configured route instead of its parent's.
+                route: this.route(),
             };
             // Older harness generations call this with no request; without a session
             // id there is nothing to key the pin by, and the descriptor fallback in

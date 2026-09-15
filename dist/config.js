@@ -92,11 +92,66 @@ export const CrewSchema = z.object({
 });
 export const CrewsSchema = z.dict(CrewSchema).default({}).description('Named crews of role-bound workers.');
 /**
+ * One named, callable preset: the composition a `subagent_preset` call selects.
+ *
+ * Every field except `presetId` is optional and falls back to the plugin's
+ * top-level value field by field, so a deployment can name several presets and
+ * give only the interesting one its own route, filter, or persona.
+ */
+export const PresetEntrySchema = z.object({
+    presetId: z.string().required().description('Agent preset this name composes children under.'),
+    description: z.string().description('Model-facing hint for when to choose this preset (shown in the tool description).'),
+    provider: z.string().description('Model provider for children of this preset (wins over the top-level provider).'),
+    model: z.string().description('Model id for children of this preset (wins over the top-level model).'),
+    maxTokens: z
+        .number()
+        .step(1)
+        .min(1)
+        .max(Number.MAX_SAFE_INTEGER)
+        .description('Output-token cap for children of this preset (wins over the top-level maxTokens).'),
+    persona: z.string().description('Per-child persona for this preset, shadowing the deployment persona.'),
+    toolFilter: z
+        .object({
+        allow: z.array(z.string()).description('Global tool names children of this preset keep.'),
+        deny: z.array(z.string()).description('Global tool names removed from children of this preset.'),
+    })
+        // Same omission guard as every other filter in this file: Schemastery would
+        // otherwise MATERIALIZE an absent nested object as `{ allow: [], deny: [] }`,
+        // and an empty allowlist strips the child's whole tool set.
+        .default(undefined)
+        .description('Optional tool scoping for children of this preset. Omitted = fall back to the top-level filter.'),
+});
+/**
+ * The plugin's own `subagent_preset` delegation tool.
+ *
+ * This tool exists so the PRESET is a call argument rather than a fixed
+ * deployment setting. The shipped `tool-subagent` consumer cannot express that:
+ * its schema exposes only `description`/`prompt`/`run_in_background` (plus the
+ * optional model-selection triple), and `SubagentStartRequest` carries no
+ * `presetId` on an unpatched harness — so a `tool-subagent` row can only ever
+ * pin the one preset its `provider` was registered with.
+ *
+ * The plugin registers one provider instance per configured preset and this
+ * tool dispatches to the right one.
+ */
+export const PresetToolSchema = z
+    .object({
+    enabled: z.boolean().default(true).description('Register the plugin-owned preset-selecting delegation tool.'),
+    toolName: z.string().default('subagent_preset').description('Model-facing tool name.'),
+})
+    .default({ enabled: true, toolName: 'subagent_preset' })
+    .description('The plugin-owned delegation tool whose `preset` argument selects the composition.');
+/**
  * The plugin's composition-time `Config` (same shape as the settings schema).
  *
  * `provider`/`model`/`maxTokens` are the DEFAULT child route. A request-level
  * `agentOptions` — on a `tool-subagent` row, on a direct `ctx.subagents.start()`
  * call, or on a crew role — overrides them field by field (see `src/route.ts`).
+ *
+ * `presetId` is the composition every child gets when the caller names no
+ * preset; `presets` adds NAMED alternatives, each registering its own provider
+ * instance (registry name `<providerName>:<name>`) and selectable per call
+ * through the `preset` argument of the tool configured by `presetTool`.
  */
 export const Config = z.object({
     providerName: z.string().default('preset').description('Registry name on ctx.subagents.'),
@@ -114,6 +169,8 @@ export const Config = z.object({
         .default(3)
         .description("Delegation depth cap, or 'provider-managed'. The effective cap is the tighter of this and the request's."),
     crews: CrewsSchema,
+    presets: z.dict(PresetEntrySchema).default({}).description('Named callable presets; each registers its own provider instance and is selectable through the `preset` argument of the plugin-owned delegation tool.'),
+    presetTool: PresetToolSchema,
     toolFilter: z
         .object({
         allow: z.array(z.string()).description('Global tool names every pinned child keeps; everything else is removed.'),

@@ -1,4 +1,5 @@
 import { applyChildComposition } from '@deepseek-ai/dsh-subagent';
+import { roleRouteOverrides } from './route.js';
 /**
  * Pins recorded for children whose creation this plugin drives, keyed by the
  * child's session id. The provider records the pin in `prepareContinuable()`,
@@ -6,6 +7,18 @@ import { applyChildComposition } from '@deepseek-ai/dsh-subagent';
  * before the child exists — the one moment a provider learns that id.
  */
 const PINS = new Map();
+/**
+ * Pins already applied to ONE LIVE ACTIVATION, keyed by the `Agent` object.
+ *
+ * Keyed by the Agent and NOT by the session id on purpose. A continuable child
+ * is disposed when it settles and re-created on the next wake, so a cold resume
+ * produces a NEW `Agent` for the SAME session id; a session-keyed "already
+ * done" set therefore skipped the re-pin and left the resumed child running on
+ * its recorded (parent's) composition and route with no error anywhere. Keying
+ * by the live Agent makes every activation re-pin, and a weak key means a
+ * disposed activation leaves nothing behind.
+ */
+const APPLIED = new WeakMap();
 /** Record the pin for one child session id. */
 export function recordPin(sessionId, pin) {
     PINS.set(sessionId, pin);
@@ -18,9 +31,33 @@ export function forgetPin(sessionId) {
 export function recordedPin(sessionId) {
     return PINS.get(sessionId);
 }
+/**
+ * The pin already applied to one live activation, for the `agent/request`
+ * listener that enforces the route. `undefined` for an agent this plugin did
+ * not pin, which keeps the waterfall inert for the root session and for every
+ * other provider's children.
+ * @param agent - the agent about to make a model call.
+ * @returns its applied pin, or undefined.
+ */
+export function appliedPin(agent) {
+    return APPLIED.get(agent);
+}
 /** Test seam: forget every recorded pin. */
 export function clearPins() {
     PINS.clear();
+}
+/**
+ * Merge a crew role's route over the provider's route, per field.
+ * @param role - the role, when the label named one.
+ * @param base - the provider instance's route.
+ * @returns the role's effective route.
+ */
+function routeFor(role, base) {
+    if (role === undefined)
+        return base;
+    // `roleRouteOverrides` omits undefined fields, so a role that pins only
+    // `model` cannot erase the provider's `provider`.
+    return { ...base, ...roleRouteOverrides(role) };
 }
 /**
  * Derive a pin from a child's own durable descriptor.
@@ -31,8 +68,13 @@ export function clearPins() {
  * the label of a crew member names its crew and role (`crew:<crew>:<role>`).
  * A descriptor that is not ours yields no pin — the resolver must never pin a
  * child some other provider is responsible for.
+ *
+ * The ROUTE is taken from live config, never from the descriptor's
+ * `agentProvider`/`agentModel`: on an unpatched harness the descriptor records
+ * the route the harness resolved at creation, which for a continuable child is
+ * the PARENT's — reading it back would faithfully re-pin the wrong model.
  * @param events - the child session's event log, read for leaf fields only.
- * @param deps - provider name and live config.
+ * @param deps - provider name, live config, and the pinned route.
  * @returns the pin, or `undefined` when this child is not one of ours.
  */
 function pinFromDescriptor(events, deps) {
@@ -46,6 +88,7 @@ function pinFromDescriptor(events, deps) {
         if (record.provider !== deps.providerName)
             continue;
         const config = deps.readConfig();
+        const base = deps.route();
         const label = typeof record.label === 'string' ? record.label : '';
         const parts = /^crew:([^:]+):([^:]+)$/.exec(label);
         if (parts !== null) {
@@ -55,10 +98,11 @@ function pinFromDescriptor(events, deps) {
                 return {
                     presetId: role.presetId ?? config.presetId,
                     ...role.toolFilter !== undefined ? { toolFilter: role.toolFilter } : {},
+                    route: routeFor(role, base),
                 };
             }
         }
-        return { presetId: config.presetId };
+        return { presetId: config.presetId, route: base };
     }
     return undefined;
 }
@@ -66,10 +110,10 @@ function pinFromDescriptor(events, deps) {
  * Resolve the pin for one live agent: the recorded pin first, the child's own
  * durable descriptor second, nothing at all when the child is not ours.
  * @param agent - the child agent.
- * @param deps - provider name and live config.
+ * @param depsList - one entry per provider instance this plugin registered.
  * @returns the pin, or `undefined` when unowned.
  */
-export function resolvePin(agent, deps) {
+export function resolvePin(agent, depsList) {
     const id = String(agent.id);
     const recorded = PINS.get(id);
     if (recorded !== undefined)
@@ -83,7 +127,14 @@ export function resolvePin(agent, deps) {
     const events = session?.snapshotEvents?.(0);
     if (events === undefined)
         return undefined;
-    return pinFromDescriptor(events, deps);
+    // One log read, then one descriptor match per provider instance: a deployment
+    // with several pinned presets must not read the log once per preset.
+    for (const deps of depsList) {
+        const pin = pinFromDescriptor(events, deps);
+        if (pin !== undefined)
+            return pin;
+    }
+    return undefined;
 }
 /**
  * Whether this child's scope can name one tool in a filter.
@@ -185,39 +236,72 @@ export async function composePinnedChild(childCtx, parent, pin, persona) {
     await rePin(childCtx, pin);
 }
 /**
- * Install the pin-enforcement listeners.
+ * Report a pin that landed after the child's first request.
  *
- * Two events, one guard. `agent/session-start` is the earliest point the child's
- * `Agent` exists ("once before the first turn") and handles the ordinary case
- * before anything reads the child's catalog; `agent/pre-step` is an AWAITED
- * waterfall, so it is the guarantee — the re-link has completed before the step
- * that assembles the request proceeds. A pin is applied once per agent; the
- * resolver returns nothing for agents this provider did not establish, so the
+ * The loop ASSEMBLES the prompt and tool schemas before the `agent/pre-step`
+ * waterfall and before `agent/request`, so a continuable child's first request
+ * is composed before any hook this plugin owns can run. The pin lands before the
+ * next request and the changed tool set/prompt forces a new request series —
+ * correct, but it throws away the child's provider prefix cache for that step.
+ * A patched harness pins at creation and never enters this path; on an
+ * unpatched one this is expected, and saying so once beats a silently
+ * half-pinned child.
+ * @param agent - the child just pinned.
+ * @param pin - the pin that was applied.
+ * @param warn - diagnostics sink.
+ */
+function warnLatePin(agent, pin, warn) {
+    const session = agent.session;
+    if (session?.requestHeader?.() === undefined)
+        return;
+    warn(`subagent-preset: child ${String(agent.id)} made a request before it was pinned to preset `
+        + `"${pin.presetId}"; that request used the parent composition and route, and the next one `
+        + 'starts a new request series (the provider prefix cache is not reused across it). '
+        + 'A harness that pins at creation avoids this entirely.');
+}
+/**
+ * Install the pin-enforcement listeners for every provider instance this plugin
+ * registered.
+ *
+ * Three listeners, one guard:
+ *  - `agent/session-start` is the earliest point the child's `Agent` exists
+ *    ("once before the first turn") and handles the ordinary case;
+ *  - `agent/pre-step` is an AWAITED waterfall, so it is the preset guarantee —
+ *    the re-link has completed before the step that assembles the next request
+ *    proceeds;
+ *  - `agent/request` is an AWAITED waterfall that replaces the call config, and
+ *    it is the ROUTE guarantee: it runs before `request/header` is logged, so
+ *    the pinned provider/model is both what the call uses and what the log
+ *    records. This is the only reason a continuable child follows the plugin's
+ *    route at all, since the provider's detached `agentOptions` is discarded by
+ *    an unpatched harness.
+ *
+ * A pin is applied once per live activation and re-applied on every new one; the
+ * resolver returns nothing for agents this plugin did not establish, so the
  * listeners are inert for the root session and for other providers' children.
  * @param ctx - the plugin's context (unscoped: it must observe every agent).
- * @param deps - provider name and live config.
- * @returns a disposer that removes both listeners.
+ * @param depsList - one entry per registered provider instance.
+ * @returns a disposer that removes every listener.
  */
-export function installPinning(ctx, deps) {
-    const settled = new Set();
-    const warn = deps.warn ?? ((message) => { ctx.logger?.warn?.(message); });
+export function installPinning(ctx, depsList) {
+    const warn = depsList[0]?.warn ?? ((message) => { ctx.logger?.warn?.(message); });
     const ensure = async (agent) => {
-        const id = String(agent.id);
-        if (settled.has(id))
+        if (APPLIED.has(agent))
             return;
-        const pin = resolvePin(agent, deps);
+        const pin = resolvePin(agent, depsList);
         if (pin === undefined)
             return;
         try {
             await rePin(agent.ctx, pin);
-            settled.add(id);
-            forgetPin(id);
+            APPLIED.set(agent, pin);
+            forgetPin(String(agent.id));
+            warnLatePin(agent, pin, warn);
         }
         catch (error) {
             // A pinned child that silently ran on its parent's composition would look
-            // like a model-behaviour bug; say so instead, once per child.
-            settled.add(id);
-            warn(`subagent-preset: could not pin child ${id} to preset "${pin.presetId}": `
+            // like a model-behaviour bug; say so instead, once per activation. It is
+            // NOT marked applied, so a later event retries it.
+            warn(`subagent-preset: could not pin child ${String(agent.id)} to preset "${pin.presetId}": `
                 + String(error instanceof Error ? error.message : error));
         }
     };
@@ -235,9 +319,26 @@ export function installPinning(ctx, deps) {
             await ensure(agent);
         return next();
     });
+    const offRequest = ctx.on('agent/request', async (payload, next) => {
+        const config = await next();
+        const pin = APPLIED.get(payload.agent);
+        if (pin === undefined)
+            return config;
+        const { provider, model, maxTokens } = pin.route;
+        if (provider === undefined && model === undefined && maxTokens === undefined)
+            return config;
+        // Only the pinned fields are replaced: reasoning effort, temperature, and
+        // stop stay whatever the caller or the adapter resolved.
+        return {
+            ...config,
+            ...provider !== undefined ? { provider } : {},
+            ...model !== undefined ? { model } : {},
+            ...maxTokens !== undefined ? { maxTokens } : {},
+        };
+    });
     return () => {
         offStart();
         offStep();
-        settled.clear();
+        offRequest();
     };
 }

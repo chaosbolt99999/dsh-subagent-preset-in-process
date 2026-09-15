@@ -134,6 +134,28 @@ and `inheritsParentContext = false`. `prepareContinuable` is present, so
 | `maxTokens` | *(none)* | Optional default output-token cap — same precedence. |
 | `maxDepth` | `3` | Delegation cap, or `'provider-managed'`. The EFFECTIVE cap is the tighter of this and the request's (a tool row always sends its own, default 3), so neither knob is silently discarded. |
 | `crews` | `{}` | Named crews (see below). |
+| `presets` | `{}` | Named, CALLABLE presets (see "Choosing the preset in the tool call"). Each entry registers its own provider instance and is selected through the `preset` argument. |
+| `presetTool` | `{ enabled: true, toolName: subagent_preset }` | The plugin-owned delegation tool whose `preset` argument selects the composition. |
+
+Preset fields (inside `presets.<name>`): `presetId` (required); **`provider`**,
+**`model`**, **`maxTokens`** (this preset's route — each falls back field by
+field to the top-level value); **`toolFilter`** (`allow`/`deny`, falls back to
+the top-level filter when omitted); **`persona`**; `description` (a model-facing
+hint).
+
+```yaml
+presets:
+  coding:
+    presetId: subagent-coder            # the agent preset this name composes
+    provider: merge                     # this preset's route (falls back per field)
+    model: zai/glm-5.3-flash
+    description: Implements or refactors code in the workspace.
+  memory:
+    presetId: subagent-worker
+    description: Recalls prior decisions and workspace context.
+presetTool:
+  toolName: subagent_preset             # the model-facing tool name
+```
 
 Role fields (inside `crews.<crew>.roles[]`): `name`, `presetId`, `roleTask`
 (required); **`agentOptions`** (`provider`/`model`/`maxTokens` — the per-role
@@ -448,6 +470,90 @@ service methods it calls.
 The durable fix is to refresh the vendored copies so the compile-time types match
 the generation that runs; until then, treat a missing runtime symbol as the
 expected failure mode of a harness update.
+
+### Choosing the preset in the tool call
+
+`subagent_preset` is registered by THIS plugin, not by a `tool-subagent` row,
+and it takes a **`preset` argument**:
+
+```jsonc
+{ "description": "Implement the parser", "prompt": "…", "preset": "coding" }
+```
+
+Omitting `preset` uses the default `presetId`. An unknown name fails loud with
+the configured names.
+
+Why the plugin owns the tool: the shipped `tool-subagent` consumer cannot
+express this. Its schema exposes only `description`/`prompt`/`run_in_background`
+(plus the optional model-selection triple), and `SubagentStartRequest` carries no
+`presetId` on an unpatched harness — so a `tool-subagent` row can only ever pin
+the one preset its `provider` instance was registered with, which is why the
+preset had to be a deployment setting.
+
+The mechanism is the provider REGISTRY rather than a new field: the plugin
+registers one provider instance per configured preset under
+`<providerName>:<name>` (plus the default under `<providerName>`), and the tool
+maps the argument to a registry name. No harness patch, and the same start paths
+the shipped consumer uses.
+
+Two deliberate choices:
+
+- **No schema `enum` for `preset`.** The tool schema is part of every caller's
+  request prefix, so baking the preset names into it would make ADDING a preset
+  silently invalidate the cached prefix of every session that mounts the tool.
+  The name is validated at call time instead.
+- **`agentOptions` is advertised.** The provider honors a request-level override
+  (`resolveRoute` merges it over the plugin route), but `assertCapabilities`
+  rejects a request that carries one unless the provider advertises the
+  capability. Omitting it made row-level route overrides unusable on the
+  one-shot path; the continuable path never ran that check, which is why the gap
+  went unnoticed.
+
+### Pinning a continuable child's ROUTE (and why it was on the wrong model)
+
+A continuable child's composition and route are chosen by the continuation
+manager, not by the provider, and an unpatched harness keeps only `seed` from
+`ContinuableCreateSpec` — the `presetId` and `agentOptions` a provider returns
+from `prepareContinuable()` are **discarded**. A `tool-subagent` row with no
+`agentOptions` therefore produced children that:
+
+- ran on the PARENT's composition until the pin listener re-linked them
+  (`agent/request`/`agent/pre-step` run after assembly), and
+- ran on the PARENT's model for their whole life, because nothing anywhere
+  applied the configured route.
+
+Observed on a live deployment: a `subagent_preset` child recorded
+`agentProvider: ccode, agentModel: deepseek/deepseek-v4.1-flash` (the caller's
+route) while the plugin settings said `merge/zai/glm-5.3-flash`.
+
+The fix pins the route through `agent/request`, the documented per-step rewrite
+of the frozen call configuration, which runs **before** `request/header` is
+logged — so the pinned provider/model is both what the call uses and what the
+durable log records:
+
+```
+agent/session-start  → best-effort early re-link
+agent/pre-step       → AWAITED: re-link the preset, apply the filter
+agent/request        → AWAITED: replace provider/model/maxTokens with the pin
+```
+
+Three properties worth knowing:
+
+- **Re-applied per ACTIVATION, not per session.** The applied-pin registry is
+  keyed by the live `Agent`, because a settled child is disposed and a later
+  wake cold-resumes it as a NEW `Agent` on the SAME session id. A session-keyed
+  "already pinned" set skipped that re-pin and left the resumed child on its
+  recorded (parent) composition and route — silently.
+- **A late pin is now reported.** The first request of a continuable child is
+  assembled before any hook this plugin owns can run, so it may still use the
+  parent's composition and route; the pin lands before the next request and the
+  changed tool set forces a new request series. That is expected on an unpatched
+  harness and now logs a warning naming the child, rather than leaving a
+  half-pinned child unexplained.
+- **The route is re-derived from live config, never read back from the
+  descriptor.** On an unpatched harness the descriptor's `agentProvider`/
+  `agentModel` record the PARENT's route, so reading it back would faithfully
+  re-pin the wrong model.
 
 ### Crew tools
 

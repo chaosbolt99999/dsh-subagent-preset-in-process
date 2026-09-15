@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert'
 import { describe, it } from 'vitest'
 import { Config } from '../src/config.js'
 import { PresetInProcessProvider, childMeta } from '../src/provider.js'
+import { forgetPin, recordedPin } from '../src/pin.js'
 
 const cfg = {
   providerName: 'preset',
@@ -73,9 +74,14 @@ describe('Config', () => {
 })
 
 describe('PresetInProcessProvider', () => {
-  it('advertises all four start-time capabilities', () => {
+  it('advertises all five start-time capabilities', () => {
     const p = new PresetInProcessProvider('preset', () => cfg as never)
     assert.deepEqual(p.capabilities, {
+      // `agentOptions` is advertised because the provider HONORS it
+      // (`resolveRoute` merges a caller override over the plugin route). Leaving
+      // it out made `assertCapabilities` reject any `tool-subagent` row that
+      // named one, silently making row-level route overrides unusable.
+      agentOptions: true,
       outputSchema: true,
       depthLimit: true,
       toolFilter: true,
@@ -91,6 +97,59 @@ describe('PresetInProcessProvider', () => {
   it('registers under its configured name', () => {
     const p = new PresetInProcessProvider('preset', () => cfg as never)
     assert.equal(p.name, 'preset')
+  })
+
+  it('resolves a NAMED preset\'s composition, route, filter, and persona over the top level', () => {
+    const p = new PresetInProcessProvider('preset:coding', () => ({
+      ...cfg,
+      presets: {
+        coding: {
+          presetId: 'subagent-coder',
+          provider: 'merge',
+          model: 'zai/glm-5.3-flash',
+          maxTokens: 32000,
+          toolFilter: { allow: ['bash'] },
+          persona: 'You are the coder.',
+        },
+      },
+    }) as never, 'coding')
+    const view = p.view()
+    assert.equal(view.presetId, 'subagent-coder')
+    assert.equal(view.provider, 'merge')
+    assert.equal(view.model, 'zai/glm-5.3-flash')
+    assert.equal(view.maxTokens, 32000)
+    assert.deepEqual(view.toolFilter, { allow: ['bash'] })
+    assert.equal(view.persona, 'You are the coder.')
+    assert.deepEqual(p.route(), { provider: 'merge', model: 'zai/glm-5.3-flash', maxTokens: 32000 })
+  })
+
+  it('falls back to the top-level preset and route for the default instance', () => {
+    const p = new PresetInProcessProvider('preset', () => cfg as never)
+    assert.equal(p.view().presetId, 'subagent-slim')
+    assert.deepEqual(p.route(), { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+  })
+
+  it('omits unset route fields, so the parent route can still be inherited', () => {
+    const p = new PresetInProcessProvider('preset', () => ({
+      ...cfg,
+      provider: undefined,
+      model: undefined,
+    }) as never)
+    assert.deepEqual(p.route(), {})
+  })
+
+  it('records the pinned ROUTE alongside the preset for continuable children', async () => {
+    const p = new PresetInProcessProvider('preset:coding', () => ({
+      ...cfg,
+      presets: { coding: { presetId: 'subagent-coder', provider: 'merge', model: 'zai/glm-5.3-flash' } },
+    }) as never, 'coding')
+    // The returned spec is discarded by an unpatched harness; the recorded pin is
+    // what the agent/request listener enforces, so it must carry the route.
+    await p.prepareContinuable({ sessionId: 'child-route', parent: {} as never, signal: new AbortController().signal } as never)
+    const pin = recordedPin('child-route')
+    assert.equal(pin?.presetId, 'subagent-coder')
+    assert.deepEqual(pin?.route, { provider: 'merge', model: 'zai/glm-5.3-flash' })
+    forgetPin('child-route')
   })
 
   it('prepareContinuable contributes the pinned preset id and the settings route', async () => {
