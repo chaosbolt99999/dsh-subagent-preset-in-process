@@ -31,8 +31,15 @@
         # below would instead be validated by the harness at creation, against
         # the parent's composition, where a plane-specific name fails the spawn
         # with "tools.restrict() names unknown global tool".
+        #
+        # This is a GLOBAL-tool mask over the child's whole view: a name the
+        # pinned preset registers but that is ABSENT here is removed from the
+        # child again — registered, activated, and invisible. `subagent-worker`
+        # therefore registers `skill` and `lsp` and both are named here; a
+        # capability added to that preset must be added to this list in the same
+        # change.
         toolFilter:
-          allow: [bash, read, write, edit, glob, grep, find_symbol, read_image, crew_wait, todo_write]
+          allow: [bash, read, write, edit, glob, grep, find_symbol, lsp, read_image, skill, crew_wait, todo_write]
         crews:
           # Routed crew (model chooses next role; add mode: pipeline for deterministic chain).
           # `toolFilter.allow` pins each role to the slim preset's tool set — REQUIRED on

@@ -290,6 +290,31 @@ crews feature in live testing and is why every role — and the
    record, not proof of isolation — verify the actual `request/header` tool
    list (or the descriptor's `toolFilter`) in the child's log.
 
+### A capability a pinned preset registers must also be named in the filter (2026-09-18)
+
+The filter is a mask over the child's **whole view**, not a restriction of the
+preset's own rows: a tool the pinned preset registers, activates, and advertises
+is still removed from the child when its name is missing from the plugin's
+`toolFilter.allow`. Adding a capability to a pinned preset is therefore a
+TWO-file change in this deployment:
+
+1. the preset composition (`$DSH_HOME/.agent-presets/<id>/agent.cordis.yml`) —
+   the rows that register the tool, and
+2. the plugin's `toolFilter.allow` in `cordis.patch.yml` — the name of every
+   tool that composition now offers.
+
+Adding rows to the preset alone is silent: the child sees no error, the tool
+simply is not in its catalog. The worker preset in this deployment now carries
+the **skills** rows (`skill-filesystem` + `tool-skill` → the `skill` tool) and a
+realm-scoped **LSP** group (`dsh-lsp` seam + `dsh-lsp-stdio` with the
+`rust-analyzer`/`gopls`/`typescript-language-server` table + `dsh-tool-lsp` → the
+`lsp` tool), and both `skill` and `lsp` are named in that allow list.
+
+`lsp-stdio` resolves EVERY configured executable at load and registers no
+provider if one is missing, so a server that is not installed on `PATH` fails
+the whole preset mount rather than only its own language. Verify the delivered
+set from the child's own `request/header.tools` — not from the preset file.
+
 ### Live-testing fixes (2026-08-27)
 
 Four bugs found by live headless crew testing (full diagnosis in
