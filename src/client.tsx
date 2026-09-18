@@ -9,10 +9,16 @@ const SETTINGS_NS = 'subagent-preset-in-process'
  * provider/crew config is editable in Settings → Plugins.
  *
  * The `provider` + `model` scalars are edited as ONE dropdown populated from
- * the host's `llm.models` catalog — the same provider groups and model ids the
- * DSH model selector renders — so the two fields can never drift apart. The
+ * the host's model catalog — the same provider groups and model ids the DSH
+ * model selector renders — so the two fields can never drift apart. The
  * remaining scalars read via the bound settingsScope snapshot and write with
  * `set(field, value)` / `unset(field)`; `crews` is edited as a JSON document.
+ *
+ * The catalog call is `ctx.remote.session.modelCatalog()`: the Remote surface
+ * this generation exposes, and the same one `ui-model-selection` reads. An
+ * earlier revision called `ctx.connection?.api.llm.models({})` — a previous
+ * generation's wire shape. `connection.api` no longer exists, so the dropdown
+ * failed with "no connection to the host" while every other field worked.
  */
 
 type Snapshot = {
@@ -31,20 +37,24 @@ type Scope = {
   unset(field: string): Promise<void>
 }
 
-/** Host `llm.models` catalog shapes (same groups the model selector renders). */
+/** Host model-catalog shapes (`ModelCatalog` in the session-controller API). */
 type CatalogModel = { id: string; name: string; description?: string }
 type CatalogGroup = { id: string; name: string; models: CatalogModel[] }
 type CatalogFailure = { id: string; name: string; message: string }
 
-type ModelResponse = {
-  result:
-    | { ok: true; value: { groups: CatalogGroup[]; failures: CatalogFailure[] } }
-    | { ok: false; error: { code: string; message: string } }
+type ModelCatalog = {
+  groups: readonly CatalogGroup[]
+  failures: readonly CatalogFailure[]
 }
 
-type Api = {
-  llm: {
-    models(payload: Record<string, never>): Promise<ModelResponse>
+type ModelCatalogResult =
+  | { ok: true; value: ModelCatalog }
+  | { ok: false; error: { code: string; message: string } }
+
+/** The `remote` face this card needs; `remote.session` is declared in `inject`. */
+type Remote = {
+  session: {
+    modelCatalog(): Promise<ModelCatalogResult>
   }
 }
 
@@ -64,7 +74,7 @@ const labelStyle: React.CSSProperties = { display: 'block', fontSize: 12, fontWe
 const inputStyle: React.CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '6px 10px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l2, #ccc)', background: 'var(--dsw-alias-bg-layer-3, #fff)', color: 'var(--dsw-alias-label-primary, #111)' }
 const saveStyle: React.CSSProperties = { padding: '8px 16px', borderRadius: 6, border: 'none', background: 'var(--dsw-alias-label-primary, #111)', color: 'var(--dsw-alias-bg-layer-3, #fff)', cursor: 'pointer' }
 
-function Card({ scope, api }: { scope: Scope; api: Api | undefined }) {
+function Card({ scope, remote }: { scope: Scope; remote: Remote | undefined }) {
   const [snap, setSnap] = React.useState<Snapshot>(() => scope.getSnapshot())
   React.useEffect(() => scope.subscribe(() => setSnap(scope.getSnapshot())), [scope])
 
@@ -96,9 +106,9 @@ function Card({ scope, api }: { scope: Scope; api: Api | undefined }) {
   const [catalogError, setCatalogError] = React.useState('')
 
   React.useEffect(() => {
-    if (api === undefined) {
+    if (remote === undefined) {
       setCatalogStatus('error')
-      setCatalogError('Model catalog unavailable: no connection to the host.')
+      setCatalogError('Model catalog unavailable: the remote service is not connected.')
       return
     }
     let cancelled = false
@@ -106,14 +116,19 @@ function Card({ scope, api }: { scope: Scope; api: Api | undefined }) {
     setCatalogError('')
     ;(async () => {
       try {
-        const resp = await api.llm.models({})
+        const resp = await remote.session.modelCatalog()
         if (cancelled) return
-        if (!resp.result.ok) {
+        if (!resp.ok) {
           setCatalogStatus('error')
-          setCatalogError(`${resp.result.error.code}: ${resp.result.error.message}`)
+          setCatalogError(`${resp.error.code}: ${resp.error.message}`)
           return
         }
-        setGroups(resp.result.value.groups)
+        setGroups([...resp.value.groups])
+        if (resp.value.groups.length === 0 && resp.value.failures.length > 0) {
+          setCatalogStatus('error')
+          setCatalogError(resp.value.failures.map((f) => `${f.name}: ${f.message}`).join('; '))
+          return
+        }
         setCatalogStatus('ready')
       } catch (e) {
         if (cancelled) return
@@ -122,7 +137,7 @@ function Card({ scope, api }: { scope: Scope; api: Api | undefined }) {
       }
     })()
     return () => { cancelled = true }
-  }, [api])
+  }, [remote])
 
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -240,15 +255,22 @@ function Card({ scope, api }: { scope: Scope; api: Api | undefined }) {
 }
 
 export const name = 'subagent-preset-in-process-client'
-export const inject = ['slots', 'settingsScope', 'connection', 'remote']
+/**
+ * `remote` is the Remote transport service and `remote.session` the namespace
+ * this card reads the model catalog from; both must be declared so the card
+ * waits for them instead of rendering a permanently empty dropdown. The old
+ * `connection` entry is gone: that service exposes the wire itself, not an
+ * `api` handle.
+ */
+export const inject = ['slots', 'settingsScope', 'remote', 'remote.session']
 
 export function apply(ctx: any): void {
   const scope: Scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS })
-  const api: Api | undefined = ctx.connection?.api
+  const remote: Remote | undefined = ctx.remote?.session === undefined ? undefined : ctx.remote
   ctx.slots.inject('settings.plugin.item', () =>
     ctx.slots.register(
-      { name: 'settings.plugin.item', key: SETTINGS_NS, inject: () => ({ scope, api }) },
-      (props: { scope: Scope; api: Api | undefined }) => React.createElement(Card, { scope: props.scope, api: props.api }),
+      { name: 'settings.plugin.item', key: SETTINGS_NS, inject: () => ({ scope, remote }) },
+      (props: { scope: Scope; remote: Remote | undefined }) => React.createElement(Card, { scope: props.scope, remote: props.remote }),
     ),
   )
 }

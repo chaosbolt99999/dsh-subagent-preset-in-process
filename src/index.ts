@@ -133,10 +133,11 @@ export function apply(ctx: Context, config: ConfigType): void {
   // adjacent-agent messaging authority.
   if (current.presetTool?.enabled !== false) {
     const choices = (): PresetChoice[] => [
-      { providerName: baseName, presetId: defaultProvider.view().presetId },
+      { providerName: baseName, presetId: defaultProvider.view().presetId, route: () => defaultProvider.route() },
       ...[...instances.entries()].map(([preset, instance]) => ({
         providerName: providerFor(preset),
         presetId: instance.view().presetId,
+        route: () => instance.route(),
       })),
     ]
     ctx.effect(() => registerPresetTool(ctx, {

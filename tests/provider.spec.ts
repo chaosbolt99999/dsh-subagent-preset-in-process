@@ -213,7 +213,7 @@ describe('PresetInProcessProvider.start composition', () => {
         agents: {
           create: (opts: any) => {
             calls.push(opts)
-            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [] } }, dispose: async () => {} })
+            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [], snapshotEvents: () => [] } }, dispose: async () => {} })
           },
         },
       },
@@ -264,7 +264,7 @@ describe('PresetInProcessProvider.start request-level route override', () => {
         agents: {
           create: (opts: any) => {
             calls.push(opts)
-            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [] } }, dispose: async () => {} })
+            return Promise.resolve({ agent: { id: 'child', followup: () => {}, whenIdle: () => Promise.resolve(), session: { events: [], snapshotEvents: () => [] } }, dispose: async () => {} })
           },
         },
       },

@@ -20,6 +20,7 @@
  * @module @dsh-subagent-preset-in-process/preset-tool
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { type RouteOverrides } from './route.js';
 import type { Config } from './config.js';
 /** One selectable preset, resolved at call time. */
 export interface PresetChoice {
@@ -29,6 +30,12 @@ export interface PresetChoice {
     readonly presetId: string;
     /** Optional model-facing hint for when to choose it. */
     readonly description?: string;
+    /**
+     * The route THIS choice pins, entry-aware: a named preset's `provider`/`model`
+     * wins over the plugin's top-level ones. Read per call so a Settings edit
+     * applies to the next delegation without a restart.
+     */
+    readonly route: () => RouteOverrides;
 }
 /** Dependencies the tool reads; injected so tests need no live harness. */
 export interface PresetToolDeps {

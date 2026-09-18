@@ -140,11 +140,14 @@ export function registerPresetTool(ctx, deps) {
             }
             const live = deps.readConfig();
             const provider = providerNameFor(a.preset, live);
-            // The pinned route is resolved here as well as by the provider instance:
-            // request-level `agentOptions` is what the harness validates and what a
-            // one-shot creation applies, while continuable children get their route
-            // from the pin listener. Both read the same resolver, so they agree.
-            const route = resolveRoute(undefined, live);
+            // The pinned route is the SELECTED choice's, not the top-level one. A
+            // request-level `agentOptions` beats the provider instance's own view
+            // (request > settings), so resolving it from the top level made
+            // `preset: '<name>'` spawn on the plugin's default model while the pin
+            // listener — which reads the instance — used the entry's. One resolver,
+            // but the ENTRY-AWARE input, so both paths agree for named presets too.
+            const chosen = deps.choices().find(choice => choice.providerName === provider);
+            const route = chosen !== undefined ? chosen.route() : resolveRoute(undefined, live);
             const prompt = [{ type: 'text', text: a.prompt }];
             const background = a.run_in_background !== false;
             exec.signal.throwIfAborted();

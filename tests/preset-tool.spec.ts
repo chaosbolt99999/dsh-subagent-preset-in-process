@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { describe, it } from 'vitest'
 import { Config } from '../src/config.js'
-import { providerNameFor } from '../src/preset-tool.js'
+import { providerNameFor, registerPresetTool } from '../src/preset-tool.js'
 
 /**
  * These tests cover the preset-SELECTING half of the delegation path: how a
@@ -74,5 +74,71 @@ describe('providerNameFor', () => {
       () => providerNameFor('nope', config),
       /unknown preset "nope"; configured presets: coding, memory/,
     )
+  })
+})
+
+describe('registerPresetTool: the selected preset decides the route', () => {
+  /** Minimal ctx capturing the registered tool and every start request. */
+  function harness(routeFor: (name: string) => Record<string, string>) {
+    const starts: Array<{ provider: string; request: any }> = []
+    let definition: any
+    const ctx = {
+      tools: { register: (def: any) => { definition = def; return () => {} } },
+      subagents: {
+        start: (provider: string, request: any) => {
+          starts.push({ provider, request })
+          return Promise.resolve({
+            id: 'run-1',
+            result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'ok' }] }),
+            dispose: () => Promise.resolve(),
+          })
+        },
+      },
+    }
+    return { ctx, starts, tool: () => definition }
+  }
+
+  const choicesFor = (routes: Record<string, Record<string, string>>) =>
+    Object.entries(routes).map(([name, route]) => ({
+      providerName: name,
+      presetId: `preset-of-${name}`,
+      route: () => route,
+    }))
+
+  it("uses the SELECTED entry's route, not the top-level one", async () => {
+    const h = harness(() => ({}))
+    registerPresetTool(h.ctx as never, {
+      toolName: 'subagent_preset',
+      readConfig: () => cfg({
+        provider: 'top-provider',
+        model: 'top-model',
+        presets: { coding: { presetId: 'subagent-coder', provider: 'ccode', model: 'deepseek/deepseek-v4.1-flash' } },
+      }) as never,
+      choices: () => choicesFor({ preset: { provider: 'merge', model: 'top-model' }, 'preset:coding': { provider: 'ccode', model: 'deepseek/deepseek-v4.1-flash' } }),
+    })
+    await h.tool().execute(
+      { description: 'd', prompt: 'p', preset: 'coding', run_in_background: false },
+      { agent: {}, signal: new AbortController().signal },
+    )
+    assert.equal(h.starts.length, 1)
+    assert.equal(h.starts[0].provider, 'preset:coding')
+    // Request-level agentOptions beats the provider's own view, so this MUST be
+    // the entry's route; the top-level route here is what made a named preset
+    // spawn on the plugin default model.
+    assert.deepEqual(h.starts[0].request.agentOptions, { provider: 'ccode', model: 'deepseek/deepseek-v4.1-flash' })
+  })
+
+  it('falls back to the top-level route for the default choice', async () => {
+    const h = harness(() => ({}))
+    registerPresetTool(h.ctx as never, {
+      toolName: 'subagent_preset',
+      readConfig: () => cfg({ provider: 'merge', model: 'zai/glm-5.3-flash' }) as never,
+      choices: () => choicesFor({ preset: { provider: 'merge', model: 'zai/glm-5.3-flash' } }),
+    })
+    await h.tool().execute(
+      { description: 'd', prompt: 'p', run_in_background: false },
+      { agent: {}, signal: new AbortController().signal },
+    )
+    assert.deepEqual(h.starts[0].request.agentOptions, { provider: 'merge', model: 'zai/glm-5.3-flash' })
   })
 })

@@ -24,7 +24,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
-import { resolveRoute } from './route.js'
+import { resolveRoute, type RouteOverrides } from './route.js'
 import type { Config, PresetEntry } from './config.js'
 
 /** One selectable preset, resolved at call time. */
@@ -35,6 +35,12 @@ export interface PresetChoice {
   readonly presetId: string
   /** Optional model-facing hint for when to choose it. */
   readonly description?: string
+  /**
+   * The route THIS choice pins, entry-aware: a named preset's `provider`/`model`
+   * wins over the plugin's top-level ones. Read per call so a Settings edit
+   * applies to the next delegation without a restart.
+   */
+  readonly route: () => RouteOverrides
 }
 
 /** Dependencies the tool reads; injected so tests need no live harness. */
@@ -219,11 +225,14 @@ export function registerPresetTool(ctx: Context, deps: PresetToolDeps): () => vo
       }
       const live = deps.readConfig()
       const provider = providerNameFor(a.preset, live)
-      // The pinned route is resolved here as well as by the provider instance:
-      // request-level `agentOptions` is what the harness validates and what a
-      // one-shot creation applies, while continuable children get their route
-      // from the pin listener. Both read the same resolver, so they agree.
-      const route = resolveRoute(undefined, live)
+      // The pinned route is the SELECTED choice's, not the top-level one. A
+      // request-level `agentOptions` beats the provider instance's own view
+      // (request > settings), so resolving it from the top level made
+      // `preset: '<name>'` spawn on the plugin's default model while the pin
+      // listener — which reads the instance — used the entry's. One resolver,
+      // but the ENTRY-AWARE input, so both paths agree for named presets too.
+      const chosen = deps.choices().find(choice => choice.providerName === provider)
+      const route = chosen !== undefined ? chosen.route() : resolveRoute(undefined, live)
       const prompt: ContentBlock[] = [{ type: 'text', text: a.prompt }]
       const background = a.run_in_background !== false
       exec.signal.throwIfAborted()
